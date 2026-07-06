@@ -263,51 +263,13 @@ class CanvasLiveSession(SQLBase, SQLMixin, LiveSessionMixin):
         payload = event.payload or {}
         server_event = None
 
-        if event_type == POSITION_EVENT:
-            server_event = self._reduce_position_event(state, event, payload)
-        elif event_type == COLLECT_EVENT:
+        if event_type == COLLECT_EVENT:
             server_event = self._reduce_collect_event(state, event, payload)
         elif event_type == "state_request":
             server_event = ServerEvent.state_snapshot(self, event.participant_id)
 
         self.state = state
         return server_event
-
-    def _reduce_position_event(
-        self, state: dict, event: ClientEvent, payload: dict
-    ) -> ServerEvent | None:
-        participant_id = str(event.participant_id)
-        if participant_id not in state.get("players", {}):
-            return ServerEvent.state_snapshot(self, event.participant_id)
-        try:
-            x = float(payload["x"])
-            y = float(payload["y"])
-            vx = float(payload["vx"])
-            vy = float(payload["vy"])
-        except (KeyError, TypeError, ValueError):
-            return ServerEvent.state_snapshot(self, event.participant_id)
-
-        canvas_size = state["params"]["world"]["canvas_size"]
-        player = state["players"][participant_id]
-        player.update(
-            {
-                "x": round(clamp(x, 0, canvas_size), 3),
-                "y": round(clamp(y, 0, canvas_size), 3),
-                "vx": round(vx, 3),
-                "vy": round(vy, 3),
-                "client_time": payload.get("client_time"),
-                "receive_time": payload.get("receive_time"),
-            }
-        )
-        return ServerEvent.from_payload(
-            {
-                "type": "position_update",
-                "session_id": self.session_id,
-                "group_id": self.group_id,
-                "target_participant_ids": [str(p_id) for p_id in self.participant_ids],
-                "player": deepcopy(player),
-            }
-        )
 
     def _reduce_collect_event(
         self, state: dict, event: ClientEvent, payload: dict
