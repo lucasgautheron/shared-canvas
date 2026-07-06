@@ -1,0 +1,23 @@
+// See also the PsyNet repository's .vscode/launch.json file
+// (consider propagating any changes there)
+{
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Breakpoints in psynet debug local",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "localhost",
+                "port": 5678
+            },
+            "pathMappings": [
+                {
+                    "localRoot": "${fileDirname}",
+                    "remoteRoot": "/tmp/dallinger_develop"
+                }
+            ]
+        }
+    ]
+}

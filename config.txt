@@ -1,0 +1,20 @@
+[Config]
+title = Shared Canvas (Chrome browser, ~1 minute to complete)
+description = A starter PsyNet experiment created with psynet-github.
+contact_email_on_error = experimenter@example.com
+organization_name = PsyNet experiment
+
+recruiter = generic
+currency = $
+wage_per_hour = 12.0
+host = 0.0.0.0
+
+# Required for PsyNet/Dallinger Docker SSH launches.
+docker_image_base_name = ghcr.io/lucasgautheron/shared-canvas/psynet-experiment-images
+docker_volumes = ${HOME}/psynet-data/assets:/psynet-data/assets
+
+[Prolific]
+# recruiter = prolific
+auto_recruit = false
+prolific_estimated_completion_minutes = 1
+base_payment = 0.20

@@ -1,0 +1,534 @@
+name: Deploy hotair debug experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_ref:
+        description: "Branch, tag, or commit SHA to deploy"
+        required: true
+        default: "main"
+        type: string
+      region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+        type: string
+      instance_type:
+        description: "EC2 instance type"
+        required: true
+        default: "m7i.xlarge"
+        type: string
+      memory_gb:
+        description: "Provisioned disk/memory size in GB passed to Dallinger"
+        required: true
+        default: "32"
+        type: string
+      server_name:
+        description: "Dallinger EC2 server name"
+        required: true
+        default: "shared-canvas-debug"
+        type: string
+      app_name:
+        description: "PsyNet debug app name"
+        required: true
+        default: "shared-canvas-debug"
+        type: string
+      dns_host:
+        description: "DNS host for the debug server"
+        required: true
+        default: "shared-canvas-debug.example.com"
+        type: string
+      ssh_key_name:
+        description: "Dallinger EC2 SSH key name"
+        required: true
+        default: "shared-canvas-ec2"
+        type: string
+      docker_cleanup:
+        description: "Prune stopped containers, dangling images, and old Docker build cache after deployment"
+        required: true
+        default: true
+        type: boolean
+      docker_builder_cache_until:
+        description: "Age filter for Docker builder cache cleanup"
+        required: true
+        default: "24h"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hotair-debug-${{ inputs.server_name }}-${{ inputs.app_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID || vars.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY || vars.AWS_SECRET_ACCESS_KEY }}
+  AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN || vars.AWS_SESSION_TOKEN }}
+  AWS_DEFAULT_REGION: ${{ inputs.region }}
+  AWS_REGION: ${{ inputs.region }}
+
+jobs:
+  deploy:
+    name: Provision and start hotair debug run
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dallinger
+          POSTGRES_PASSWORD: dallinger
+          POSTGRES_DB: dallinger
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dallinger -d dallinger"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout selected ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.deploy_ref }}
+          lfs: true
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          set -euo pipefail
+          echo "${{ github.token }}" | docker login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements.txt
+            constraints.txt
+
+      - name: Install experiment dependencies
+        run: |
+          set -euo pipefail
+
+          uv venv --python 3.13 .venv
+          source .venv/bin/activate
+
+          if [ -f requirements.txt ] && [ -f constraints.txt ]; then
+            uv pip install -r requirements.txt -c constraints.txt
+          elif [ -f requirements.txt ]; then
+            uv pip install -r requirements.txt
+          elif [ -f constraints.txt ]; then
+            uv pip install -r constraints.txt
+          else
+            echo "Missing requirements.txt or constraints.txt." >&2
+            exit 1
+          fi
+
+          command -v dallinger >/dev/null
+          command -v psynet >/dev/null
+
+      - name: Verify Redis is available
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if python3 - <<'PY'
+          import socket
+
+          with socket.create_connection(("127.0.0.1", 6379), timeout=1):
+              pass
+          PY
+            then
+              echo "Redis is accepting connections."
+              exit 0
+            fi
+            echo "Waiting for Redis on localhost:6379 (${attempt}/30)..."
+            sleep 2
+          done
+
+          echo "Redis did not become available on localhost:6379." >&2
+          exit 1
+
+      - name: Verify PostgreSQL is available
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..30}; do
+            if python3 - <<'PY'
+          import socket
+
+          with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+              pass
+          PY
+            then
+              echo "PostgreSQL is accepting connections."
+              exit 0
+            fi
+            echo "Waiting for PostgreSQL on localhost:5432 (${attempt}/30)..."
+            sleep 2
+          done
+
+          echo "PostgreSQL did not become available on localhost:5432." >&2
+          exit 1
+
+      - name: Configure Dallinger and AWS environment
+        env:
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          DASHBOARD_USER: ${{ secrets.DALLINGER_DASHBOARD_USER || vars.DALLINGER_DASHBOARD_USER }}
+          DASHBOARD_PASSWORD: ${{ secrets.DALLINGER_DASHBOARD_PASSWORD || vars.DALLINGER_DASHBOARD_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+            echo "Missing AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY GitHub secrets." >&2
+            exit 1
+          fi
+          if [ -z "${DASHBOARD_USER:-}" ] || [ -z "${DASHBOARD_PASSWORD:-}" ]; then
+            echo "Missing DALLINGER_DASHBOARD_USER or DALLINGER_DASHBOARD_PASSWORD GitHub secrets/variables." >&2
+            exit 1
+          fi
+
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+
+          if [ -z "${EC2_SSH_PRIVATE_KEY:-}" ]; then
+            echo "Missing EC2_SSH_PRIVATE_KEY GitHub secret." >&2
+            exit 1
+          fi
+
+          printf '%s\n' "${EC2_SSH_PRIVATE_KEY}" > "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem"
+          chmod 600 "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem"
+          ssh-keygen -y -f "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem" > "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem.pub"
+          cp "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem.pub" "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pub"
+          eval "$(ssh-agent -s)"
+          ssh-add "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem"
+
+          touch "${HOME}/.ssh/known_hosts"
+
+          cat > "${HOME}/.dallingerconfig" <<EOF
+          [Parameters]
+          aws_region = ${{ inputs.region }}
+          ec2_default_pem = ${{ inputs.ssh_key_name }}
+          server_pem = ~/.ssh/${{ inputs.ssh_key_name }}.pem
+          dashboard_user = ${DASHBOARD_USER}
+          dashboard_password = ${DASHBOARD_PASSWORD}
+          EOF
+
+      - name: Validate deployment inputs
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          patterns = {
+              "region": r"[a-z]{2}-[a-z]+-\d",
+              "instance_type": r"[a-z0-9]+\.[a-z0-9]+",
+              "memory_gb": r"[1-9][0-9]{0,3}",
+              "server_name": r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]",
+              "app_name": r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]",
+              "dns_host": r"[A-Za-z0-9][A-Za-z0-9.-]{1,253}[A-Za-z0-9]",
+              "ssh_key_name": r"[A-Za-z0-9._-]{1,255}",
+          }
+          values = {
+              "region": "${{ inputs.region }}",
+              "instance_type": "${{ inputs.instance_type }}",
+              "memory_gb": "${{ inputs.memory_gb }}",
+              "server_name": "${{ inputs.server_name }}",
+              "app_name": "${{ inputs.app_name }}",
+              "dns_host": "${{ inputs.dns_host }}",
+              "ssh_key_name": "${{ inputs.ssh_key_name }}",
+          }
+          for key, pattern in patterns.items():
+              if not re.fullmatch(pattern, values[key]):
+                  print(f"Invalid {key}: {values[key]}", file=sys.stderr)
+                  sys.exit(2)
+          PY
+
+      - name: Check whether EC2 server exists
+        id: server
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          dallinger ec2 list instances --region "${{ inputs.region }}" > ec2-instances.txt
+
+          python3 - <<'PY' >> "${GITHUB_OUTPUT}"
+          from pathlib import Path
+
+          server_name = "${{ inputs.server_name }}"
+          listing = Path("ec2-instances.txt").read_text(encoding="utf-8", errors="replace")
+          exists = server_name in listing
+          print(f"exists={'true' if exists else 'false'}")
+          PY
+
+      - name: Verify SSH key for existing server
+        id: ssh_auth
+        if: ${{ steps.server.outputs.exists == 'true' }}
+        run: |
+          set -euo pipefail
+
+          key_path="${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem"
+          for attempt in {1..12}; do
+            if ssh \
+              -i "${key_path}" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=10 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "ubuntu@${{ inputs.dns_host }}" \
+              true; then
+              echo "Authenticated to existing EC2 server with EC2_SSH_PRIVATE_KEY."
+              echo "recreate=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            echo "Waiting for SSH authentication to existing server (${attempt}/12)..."
+            sleep 10
+          done
+
+          cat >&2 <<'EOF'
+          Could not authenticate to the existing EC2 server with EC2_SSH_PRIVATE_KEY.
+
+          This usually means the server already existed and was provisioned with
+          a different SSH key. This workflow will intentionally tear down the
+          existing EC2 server and provision a fresh one with the configured key.
+          EOF
+
+          echo "recreate=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Terminate existing EC2 server after SSH auth failure
+        if: ${{ steps.ssh_auth.outputs.recreate == 'true' }}
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          python3 - <<'PY'
+          import sys
+
+          import boto3
+
+          server_name = "${{ inputs.server_name }}"
+          region = "${{ inputs.region }}"
+
+          ec2 = boto3.client("ec2", region_name=region)
+          response = ec2.describe_instances(
+              Filters=[
+                  {"Name": "tag:Name", "Values": [server_name]},
+                  {
+                      "Name": "instance-state-name",
+                      "Values": ["pending", "running", "stopping", "stopped"],
+                  },
+              ]
+          )
+          instance_ids = [
+              instance["InstanceId"]
+              for reservation in response["Reservations"]
+              for instance in reservation["Instances"]
+          ]
+
+          if not instance_ids:
+              print(f"No active EC2 instances found with Name tag {server_name!r}.")
+              sys.exit(0)
+
+          print(f"Terminating EC2 instance(s) for {server_name!r}: {', '.join(instance_ids)}")
+          ec2.terminate_instances(InstanceIds=instance_ids)
+          waiter = ec2.get_waiter("instance_terminated")
+          waiter.wait(InstanceIds=instance_ids)
+          print("Existing EC2 instance(s) terminated.")
+          PY
+
+      - name: Delete stale EC2 key pair before provisioning
+        if: ${{ steps.server.outputs.exists != 'true' || steps.ssh_auth.outputs.recreate == 'true' }}
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          python3 - <<'PY'
+          import sys
+
+          import boto3
+          from botocore.exceptions import ClientError
+
+          key_name = "${{ inputs.ssh_key_name }}"
+          region = "${{ inputs.region }}"
+
+          ec2 = boto3.client("ec2", region_name=region)
+          try:
+              ec2.delete_key_pair(KeyName=key_name)
+          except ClientError as exc:
+              code = exc.response.get("Error", {}).get("Code")
+              if code == "InvalidKeyPair.NotFound":
+                  print(f"EC2 key pair {key_name!r} was not present in {region}.")
+              else:
+                  print(f"Failed to delete EC2 key pair {key_name!r}: {exc}", file=sys.stderr)
+                  raise
+          else:
+              print(
+                  f"Deleted existing EC2 key pair {key_name!r} in {region}; "
+                  "Dallinger will import the public key matching EC2_SSH_PRIVATE_KEY."
+              )
+          PY
+
+      - name: Provision EC2 server if needed
+        if: ${{ steps.server.outputs.exists != 'true' || steps.ssh_auth.outputs.recreate == 'true' }}
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          # This debug workflow intentionally owns the configured DNS host.
+          # Confirm Dallinger's overwrite prompt non-interactively.
+          printf 'y\n' | dallinger ec2 provision \
+            --name "${{ inputs.server_name }}" \
+            --region "${{ inputs.region }}" \
+            --dns-host "${{ inputs.dns_host }}" \
+            --type "${{ inputs.instance_type }}" \
+            --storage "${{ inputs.memory_gb }}"
+
+      - name: Register Dallinger SSH server
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          # A fresh GitHub runner has an empty Dallinger SSH host registry.
+          # Register the DNS host even when EC2 provisioning was skipped because
+          # the instance already existed.
+          set +e
+          dallinger docker-ssh servers remove --host "${{ inputs.dns_host }}"
+          set -e
+
+          dallinger docker-ssh servers add \
+            --host "${{ inputs.dns_host }}" \
+            --user ubuntu
+
+      - name: Stop existing debug run if present
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          set +e
+          printf 'y\n' | psynet destroy ssh \
+            --app "${{ inputs.app_name }}" \
+            --server "${{ inputs.dns_host }}"
+          status=$?
+          set -e
+
+          if [ "${status}" -eq 0 ]; then
+            echo "Stopped existing debug app '${{ inputs.app_name }}'."
+          else
+            echo "No existing debug app '${{ inputs.app_name }}' was destroyed, or destroy reported a non-fatal failure."
+          fi
+
+      - name: Configure hotair recruiter
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("config.txt")
+          text = path.read_text(encoding="utf-8")
+          lines = text.splitlines()
+
+          in_config = False
+          replaced = False
+          output = []
+          for line in lines:
+              stripped = line.strip()
+              if stripped.startswith("[") and stripped.endswith("]"):
+                  if in_config and not replaced:
+                      output.append("recruiter = hotair")
+                      replaced = True
+                  in_config = stripped == "[Config]"
+              if in_config and stripped.startswith("recruiter"):
+                  output.append("recruiter = hotair")
+                  replaced = True
+              else:
+                  output.append(line)
+
+          if in_config and not replaced:
+              output.append("recruiter = hotair")
+          elif not replaced:
+              output.extend(["", "[Config]", "recruiter = hotair"])
+
+          path.write_text("\n".join(output) + "\n", encoding="utf-8")
+          PY
+
+      - name: Start hotair debug run
+        env:
+          # The starter template defaults to PsyNet's GitLab master branch for
+          # convenience. This debug workflow permits that unpinned dependency;
+          # use `psynet-github create --psynet-version ...` for pinned runs.
+          SKIP_CHECK_PSYNET_VERSION_REQUIREMENT: "1"
+          SKIP_VERSION_CHECK: "1"
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          # Dallinger's Docker-SSH path calls ssh-add internally, so the agent
+          # must be active in this same shell step.
+          eval "$(ssh-agent -s)"
+          ssh-add "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem"
+
+          psynet debug ssh \
+            --app "${{ inputs.app_name }}" \
+            --dns-host "${{ inputs.dns_host }}" \
+            --server "${{ inputs.dns_host }}"
+
+      - name: Cleanup remote Docker artifacts
+        if: ${{ inputs.docker_cleanup }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i "${HOME}/.ssh/${{ inputs.ssh_key_name }}.pem" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "ubuntu@${{ inputs.dns_host }}" \
+            "docker container prune -f || true; docker image prune -f || true; docker builder prune -f --filter 'until=${{ inputs.docker_builder_cache_until }}' || true"
+
+      - name: Write deployment summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Hotair debug deployment"
+            echo
+            echo "- Ref: ${{ inputs.deploy_ref }}"
+            echo "- App: ${{ inputs.app_name }}"
+            echo "- Server name: ${{ inputs.server_name }}"
+            echo "- DNS host: ${{ inputs.dns_host }}"
+            echo "- Region: ${{ inputs.region }}"
+            echo "- Instance type: ${{ inputs.instance_type }}"
+            echo "- Memory/storage GB: ${{ inputs.memory_gb }}"
+            echo
+            echo "Participant URL:"
+            echo
+            echo "https://${{ inputs.dns_host }}/ad?generate_tokens=true&recruiter=hotair&mode=debug"
+            echo
+            echo "Stop command:"
+            echo
+            echo "\`psynet destroy ssh --app \"${{ inputs.app_name }}\" --server \"${{ inputs.dns_host }}\"\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
