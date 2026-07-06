@@ -1,0 +1,307 @@
+{% extends "timeline-page.html" %}
+{% block main_body %}
+<style>
+  .canvas-shell {
+    max-width: 760px;
+    margin: 0 auto;
+    font-family: system-ui, sans-serif;
+    text-align: center;
+  }
+  .bonus-pill {
+    display: inline-block;
+    margin: 0.4rem 0 0.8rem;
+    padding: 0.5rem 0.9rem;
+    border-radius: 999px;
+    background: #fff7d6;
+    border: 1px solid #f0d76b;
+    color: #594300;
+    font-size: 1.1rem;
+    font-weight: 700;
+  }
+  #shared-canvas {
+    width: min(640px, 92vw);
+    height: min(640px, 92vw);
+    border: 2px solid #22334d;
+    border-radius: 14px;
+    background: #f8fbff;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  }
+  .canvas-help {
+    margin: 0.75rem auto 0;
+    max-width: 620px;
+    color: #52606d;
+  }
+</style>
+<div class="canvas-shell">
+  <h2>Shared canvas</h2>
+  <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
+  <canvas id="shared-canvas" width="{{ js_vars.game_config.canvas_size }}" height="{{ js_vars.game_config.canvas_size }}"></canvas>
+  <p class="canvas-help">Use the arrow keys to move. Collect the gold coins before the session ends.</p>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  var cfg = {{ js_vars.game_config | tojson }};
+  var canvas = document.getElementById("shared-canvas");
+  var ctx = canvas.getContext("2d");
+  var socket = null;
+  var players = {};
+  var coins = [];
+  var pendingCollections = {};
+  var collectedCoinIds = [];
+  var keys = {};
+  var own = {
+    participant_id: String(cfg.participant_id),
+    label: cfg.role,
+    color: "#1f77b4",
+    x: cfg.canvas_size / 2,
+    y: cfg.canvas_size / 2,
+    vx: 0,
+    vy: 0,
+    client_time: performance.now(),
+    received_at: performance.now()
+  };
+  var bonus = 0;
+  var lastDrawAt = performance.now();
+  var startedAt = performance.now();
+  var submitted = false;
+
+  function wsSend(payload) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      var message = Object.assign({
+        participant_id: cfg.participant_id,
+        session_id: cfg.session_id,
+        immediate: true
+      }, payload);
+      socket.send(cfg.channel + ":" + JSON.stringify(message));
+    }
+  }
+
+  function updateBonus(value) {
+    bonus = Number(value || 0);
+    document.getElementById("coin-bonus").textContent = bonus.toFixed(2);
+    var performanceReward = document.getElementById("performance-reward");
+    var totalReward = document.getElementById("total-reward");
+    var rewardDetails = document.getElementById("reward-details");
+    if (performanceReward) performanceReward.textContent = bonus.toFixed(2);
+    if (totalReward) {
+      var timeRewardEl = document.getElementById("time-reward");
+      var timeReward = timeRewardEl ? Number(timeRewardEl.textContent || 0) : 0;
+      totalReward.textContent = (timeReward + bonus).toFixed(2);
+    }
+    if (rewardDetails) rewardDetails.style.display = "";
+  }
+
+  function applySnapshot(msg) {
+    players = {};
+    Object.keys(msg.players || {}).forEach(function (participantId) {
+      var player = msg.players[participantId];
+      players[String(participantId)] = Object.assign({}, player, {
+        received_at: performance.now()
+      });
+    });
+    if (players[String(cfg.participant_id)]) {
+      own = Object.assign(own, players[String(cfg.participant_id)]);
+    }
+    coins = (msg.coins || []).slice();
+    var bonuses = msg.bonuses || {};
+    updateBonus(bonuses[String(cfg.participant_id)] || 0);
+  }
+
+  function applyPosition(player) {
+    var participantId = String(player.participant_id);
+    if (participantId === String(cfg.participant_id)) return;
+    players[participantId] = Object.assign({}, player, {received_at: performance.now()});
+  }
+
+  function applyCollection(msg) {
+    var collection = msg.collection || {};
+    coins = (msg.coins || coins).filter(function (coin) {
+      return coin.id !== collection.coin_id;
+    });
+    delete pendingCollections[collection.coin_id];
+    if (String(collection.participant_id) === String(cfg.participant_id)) {
+      collectedCoinIds.push(collection.coin_id);
+      updateBonus((msg.bonuses || {})[String(cfg.participant_id)] || (bonus + cfg.coin_bonus));
+    } else if (msg.bonuses) {
+      updateBonus(msg.bonuses[String(cfg.participant_id)] || bonus);
+    }
+  }
+
+  function handleCollectRejected(msg) {
+    delete pendingCollections[msg.coin_id];
+  }
+
+  function integrateOwnPlayer(now) {
+    var dt = Math.min(0.08, (now - lastDrawAt) / 1000);
+    var acceleration = 900;
+    var friction = 0.90;
+    var maxSpeed = 260;
+    var ax = 0;
+    var ay = 0;
+    if (keys.ArrowLeft) ax -= acceleration;
+    if (keys.ArrowRight) ax += acceleration;
+    if (keys.ArrowUp) ay -= acceleration;
+    if (keys.ArrowDown) ay += acceleration;
+    own.vx = (Number(own.vx) || 0) + ax * dt;
+    own.vy = (Number(own.vy) || 0) + ay * dt;
+    if (!ax) own.vx *= friction;
+    if (!ay) own.vy *= friction;
+    var speed = Math.hypot(own.vx, own.vy);
+    if (speed > maxSpeed) {
+      own.vx = own.vx / speed * maxSpeed;
+      own.vy = own.vy / speed * maxSpeed;
+    }
+    own.x = Math.max(cfg.player_radius, Math.min(cfg.canvas_size - cfg.player_radius, own.x + own.vx * dt));
+    own.y = Math.max(cfg.player_radius, Math.min(cfg.canvas_size - cfg.player_radius, own.y + own.vy * dt));
+    own.client_time = now;
+    own.received_at = now;
+    players[String(cfg.participant_id)] = Object.assign({}, own);
+  }
+
+  function renderedPlayer(player, now) {
+    var age = Math.min(160, now - (player.received_at || now)) / 1000;
+    return Object.assign({}, player, {
+      x: Number(player.x || 0) + Number(player.vx || 0) * age,
+      y: Number(player.y || 0) + Number(player.vy || 0) * age
+    });
+  }
+
+  function draw(now) {
+    integrateOwnPlayer(now);
+    ctx.clearRect(0, 0, cfg.canvas_size, cfg.canvas_size);
+    ctx.fillStyle = "#f8fbff";
+    ctx.fillRect(0, 0, cfg.canvas_size, cfg.canvas_size);
+    ctx.strokeStyle = "#d8e2ef";
+    ctx.lineWidth = 1;
+    for (var grid = 80; grid < cfg.canvas_size; grid += 80) {
+      ctx.beginPath();
+      ctx.moveTo(grid, 0);
+      ctx.lineTo(grid, cfg.canvas_size);
+      ctx.moveTo(0, grid);
+      ctx.lineTo(cfg.canvas_size, grid);
+      ctx.stroke();
+    }
+    coins.forEach(function (coin) {
+      ctx.beginPath();
+      ctx.arc(coin.x, coin.y, coin.radius || cfg.coin_radius, 0, Math.PI * 2);
+      ctx.fillStyle = "#f4c430";
+      ctx.fill();
+      ctx.strokeStyle = "#a27400";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+    Object.keys(players).forEach(function (participantId) {
+      var player = renderedPlayer(players[participantId], now);
+      var isOwn = String(participantId) === String(cfg.participant_id);
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, cfg.player_radius, 0, Math.PI * 2);
+      ctx.fillStyle = player.color || (isOwn ? "#1f77b4" : "#d62728");
+      ctx.fill();
+      ctx.lineWidth = isOwn ? 4 : 2;
+      ctx.strokeStyle = isOwn ? "#111827" : "#ffffff";
+      ctx.stroke();
+    });
+    checkCoinCollections();
+    lastDrawAt = now;
+  }
+
+  function checkCoinCollections() {
+    coins.forEach(function (coin) {
+      if (pendingCollections[coin.id]) return;
+      var distance = Math.hypot(Number(coin.x) - own.x, Number(coin.y) - own.y);
+      if (distance <= (coin.radius || cfg.coin_radius) + cfg.player_radius) {
+        pendingCollections[coin.id] = true;
+        wsSend({
+          type: "CollectEvent",
+          coin_id: coin.id,
+          x: own.x,
+          y: own.y,
+          client_time: performance.now()
+        });
+      }
+    });
+  }
+
+  function sendPosition() {
+    wsSend({
+      type: "PositionEvent",
+      x: own.x,
+      y: own.y,
+      vx: own.vx,
+      vy: own.vy,
+      client_time: performance.now(),
+      low_latency: true
+    });
+  }
+
+  function submitFinalAnswer() {
+    if (submitted) return;
+    submitted = true;
+    psynet.response.staged.rawAnswer = {
+      completed_live_canvas: true,
+      collected_coin_ids: collectedCoinIds,
+      coin_bonus: bonus,
+      final_position: {x: own.x, y: own.y, vx: own.vx, vy: own.vy},
+      world_id: cfg.world_id
+    };
+    psynet.response.staged.metadata = {completed_live_canvas: true};
+    psynet.submitResponse(function () { submitted = false; });
+  }
+
+  document.addEventListener("keydown", function (event) {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].indexOf(event.key) >= 0) {
+      keys[event.key] = true;
+      event.preventDefault();
+    }
+  });
+  document.addEventListener("keyup", function (event) {
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].indexOf(event.key) >= 0) {
+      keys[event.key] = false;
+      event.preventDefault();
+    }
+  });
+
+  var wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
+  socket = new ReconnectingWebSocket(
+    wsScheme + location.host + "/chat?channel=" + cfg.channel
+    + "&worker_id=" + dallinger.identity.workerId
+    + "&participant_id=" + cfg.participant_id
+    + "&tolerance=0.005"
+  );
+  socket.onopen = function () {
+    wsSend({type: "state_request"});
+  };
+  socket.onmessage = function (event) {
+    if (event.data.indexOf(cfg.channel + ":") !== 0) return;
+    var msg;
+    try {
+      msg = JSON.parse(event.data.slice(cfg.channel.length + 1));
+    } catch (e) { return; }
+    if (msg.session_id && String(msg.session_id) !== String(cfg.session_id)) return;
+    var targetIds = Array.isArray(msg.target_participant_ids)
+      ? msg.target_participant_ids.map(String)
+      : null;
+    if (targetIds && targetIds.indexOf(String(cfg.participant_id)) === -1) return;
+    if (msg.target_participant_id &&
+        String(msg.target_participant_id) !== String(cfg.participant_id)) return;
+    if (!targetIds && !msg.target_participant_id &&
+        Number(msg.group_id) !== Number(cfg.group_id)) return;
+    if (msg.type === "state_snapshot") {
+      applySnapshot(msg);
+    } else if (msg.type === "position_update") {
+      applyPosition(msg.player);
+    } else if (msg.type === "coin_collected") {
+      applyCollection(msg);
+    } else if (msg.type === "collect_rejected") {
+      handleCollectRejected(msg);
+    }
+  };
+
+  setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);
+  setInterval(sendPosition, cfg.send_interval_ms);
+  setInterval(function () {
+    if (performance.now() - startedAt >= cfg.trial_seconds * 1000) submitFinalAnswer();
+  }, 200);
+});
+</script>
+{% endblock %}
