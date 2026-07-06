@@ -22,6 +22,8 @@ from psynet.sync import GroupBarrier, SimpleGrouper
 from psynet.timeline import NullElt, Page, PageMaker, Timeline, WebSocketElt, join
 from psynet.trial.static import StaticNode, StaticTrial, StaticTrialMaker
 
+from psynet.consent import NoConsent
+
 
 GROUP_TYPE = "shared_canvas_group"
 CANVAS_WS_CHANNEL = "shared_canvas_live"
@@ -715,6 +717,7 @@ class Exp(psynet.experiment.Experiment):
     }
 
     timeline = Timeline(
+        NoConsent(),
         CanvasWebSocket(),
         SimpleGrouper(
             group_type=GROUP_TYPE,
