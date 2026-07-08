@@ -70,7 +70,7 @@ document.addEventListener("DOMContentLoaded", function () {
         session_id: cfg.session_id,
         page_uuid: pageUuid,
         sender: String(cfg.participant_id),
-        immediate: true
+        immediate: Boolean(cfg.immediate)
       }, payload);
       socket.send(cfg.channel + ":" + JSON.stringify(message));
     }
@@ -264,7 +264,7 @@ document.addEventListener("DOMContentLoaded", function () {
     wsScheme + location.host + "/chat?channel=" + cfg.channel
     + "&worker_id=" + dallinger.identity.workerId
     + "&participant_id=" + cfg.participant_id
-    + "&tolerance=0.005"
+    + "&tolerance=" + encodeURIComponent(String(cfg.tolerance))
   );
   socket.onopen = function () {
     wsSend({type: "state_request"});

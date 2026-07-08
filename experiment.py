@@ -55,6 +55,8 @@ else:
 
 GROUP_TYPE = "shared_canvas_group"
 CANVAS_WS_CHANNEL = "shared_canvas_live"
+CANVAS_WS_IMMEDIATE = True
+CANVAS_WS_TOLERANCE = 0.005
 GROUP_SIZE = max(2, int(os.environ.get("CANVAS_GROUP_SIZE", "2")))
 CANVAS_SIZE = 640
 TRIAL_SECONDS = int(os.environ.get("CANVAS_TRIAL_SECONDS", "35"))
@@ -599,6 +601,8 @@ def build_game_config(trial, participant: Participant) -> dict:
     )
     return {
         "channel": CANVAS_WS_CHANNEL,
+        "immediate": CANVAS_WS_IMMEDIATE,
+        "tolerance": CANVAS_WS_TOLERANCE,
         "session_id": session_id,
         "participant_id": participant.id,
         "group_id": int(group.id),
