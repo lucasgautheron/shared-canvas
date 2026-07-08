@@ -1,5 +1,4 @@
-{% extends "timeline-page.html" %}
-{% block main_body %}
+{% macro shared_canvas_control(params) %}
 <style>
   .canvas-shell {
     max-width: 760px;
@@ -35,12 +34,12 @@
 <div class="canvas-shell">
   <h2>Shared canvas</h2>
   <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
-  <canvas id="shared-canvas" width="{{ js_vars.game_config.canvas_size }}" height="{{ js_vars.game_config.canvas_size }}"></canvas>
+  <canvas id="shared-canvas" width="{{ params.game_config.canvas_size }}" height="{{ params.game_config.canvas_size }}"></canvas>
   <p class="canvas-help">Use the arrow keys to move. Collect the gold coins before the session ends.</p>
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
-  var cfg = {{ js_vars.game_config | tojson }};
+  var cfg = JSON.parse('{{ params.game_config | tojson | forceescape }}');
   var canvas = document.getElementById("shared-canvas");
   var ctx = canvas.getContext("2d");
   var socket = null;
@@ -68,8 +67,9 @@ document.addEventListener("DOMContentLoaded", function () {
   function wsSend(payload) {
     if (socket && socket.readyState === WebSocket.OPEN) {
       var message = Object.assign({
-        participant_id: cfg.participant_id,
         session_id: cfg.session_id,
+        page_uuid: pageUuid,
+        sender: String(cfg.participant_id),
         immediate: true
       }, payload);
       socket.send(cfg.channel + ":" + JSON.stringify(message));
@@ -176,7 +176,7 @@ document.addEventListener("DOMContentLoaded", function () {
     for (var grid = 80; grid < cfg.canvas_size; grid += 80) {
       ctx.beginPath();
       ctx.moveTo(grid, 0);
-      ctx.lineTo(grid, cfg.canvas_size);
+      ctx.lineTo(grid, 0 + cfg.canvas_size);
       ctx.moveTo(0, grid);
       ctx.lineTo(cfg.canvas_size, grid);
       ctx.stroke();
@@ -212,7 +212,7 @@ document.addEventListener("DOMContentLoaded", function () {
       if (distance <= (coin.radius || cfg.coin_radius) + cfg.player_radius) {
         pendingCollections[coin.id] = true;
         wsSend({
-          type: "CollectEvent",
+          type: "collect",
           coin_id: coin.id,
           x: own.x,
           y: own.y,
@@ -224,7 +224,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function sendPosition() {
     wsSend({
-      type: "PositionEvent",
+      type: "position",
       x: own.x,
       y: own.y,
       vx: own.vx,
@@ -237,15 +237,13 @@ document.addEventListener("DOMContentLoaded", function () {
   function submitFinalAnswer() {
     if (submitted) return;
     submitted = true;
-    psynet.response.staged.rawAnswer = {
-      completed_live_canvas: true,
-      collected_coin_ids: collectedCoinIds,
-      coin_bonus: bonus,
-      final_position: {x: own.x, y: own.y, vx: own.vx, vy: own.vy},
+    psynet.nextPage({
+      completed_live_canvas_browser: true,
+      client_collected_coin_ids: collectedCoinIds,
+      client_coin_bonus: bonus,
+      client_final_position: {x: own.x, y: own.y, vx: own.vx, vy: own.vy},
       world_id: cfg.world_id
-    };
-    psynet.response.staged.metadata = {completed_live_canvas: true};
-    psynet.submitResponse(function () { submitted = false; });
+    });
   }
 
   document.addEventListener("keydown", function (event) {
@@ -278,6 +276,8 @@ document.addEventListener("DOMContentLoaded", function () {
       msg = JSON.parse(event.data.slice(cfg.channel.length + 1));
     } catch (e) { return; }
     if (msg.session_id && String(msg.session_id) !== String(cfg.session_id)) return;
+    // The current Dallinger relay broadcasts channel messages to subscribers;
+    // target filtering is for rendering only, not a privacy boundary.
     var targetIds = Array.isArray(msg.target_participant_ids)
       ? msg.target_participant_ids.map(String)
       : null;
@@ -304,4 +304,4 @@ document.addEventListener("DOMContentLoaded", function () {
   }, 200);
 });
 </script>
-{% endblock %}
+{% endmacro %}
