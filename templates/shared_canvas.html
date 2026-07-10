@@ -25,6 +25,10 @@
     background: #f8fbff;
     box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
   }
+  #shared-canvas:focus {
+    outline: 3px solid #4f8cff;
+    outline-offset: 4px;
+  }
   .canvas-help {
     margin: 0.75rem auto 0;
     max-width: 620px;
@@ -34,12 +38,12 @@
 <div class="canvas-shell">
   <h2>Shared canvas</h2>
   <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
-  <canvas id="shared-canvas" width="{{ params.game_config.canvas_size }}" height="{{ params.game_config.canvas_size }}"></canvas>
+  <canvas id="shared-canvas" width="{{ params.game_config.canvas_size }}" height="{{ params.game_config.canvas_size }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
   <p class="canvas-help">Use the arrow keys to move. Collect the gold coins before the session ends.</p>
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
-  var cfg = JSON.parse('{{ params.game_config | tojson | forceescape }}');
+  var cfg = {{ params.game_config | tojson }};
   var canvas = document.getElementById("shared-canvas");
   var ctx = canvas.getContext("2d");
   var socket = null;
@@ -48,6 +52,7 @@ document.addEventListener("DOMContentLoaded", function () {
   var pendingCollections = {};
   var collectedCoinIds = [];
   var keys = {};
+  var arrowKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
   var own = {
     participant_id: String(cfg.participant_id),
     label: cfg.role,
@@ -246,18 +251,51 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  document.addEventListener("keydown", function (event) {
-    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].indexOf(event.key) >= 0) {
-      keys[event.key] = true;
-      event.preventDefault();
+  function focusCanvas() {
+    if (document.activeElement !== canvas) {
+      canvas.focus();
     }
-  });
-  document.addEventListener("keyup", function (event) {
-    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].indexOf(event.key) >= 0) {
-      keys[event.key] = false;
-      event.preventDefault();
+  }
+
+  function arrowKeyForEvent(event) {
+    if (arrowKeys.indexOf(event.key) >= 0) return event.key;
+    if (arrowKeys.indexOf(event.code) >= 0) return event.code;
+    return null;
+  }
+
+  function isTextInput(target) {
+    var tagName = target && target.tagName ? target.tagName.toLowerCase() : "";
+    return tagName === "input" || tagName === "textarea" || tagName === "select" ||
+      Boolean(target && target.isContentEditable);
+  }
+
+  function handleArrowKeyDown(event) {
+    if (isTextInput(event.target)) return;
+    var key = arrowKeyForEvent(event);
+    if (!key) return;
+    event.preventDefault();
+    focusCanvas();
+    var wasPressed = Boolean(keys[key]);
+    keys[key] = true;
+    if (!wasPressed) {
+      draw(performance.now());
+      sendPosition();
     }
-  });
+  }
+
+  function handleArrowKeyUp(event) {
+    var key = arrowKeyForEvent(event);
+    if (!key) return;
+    keys[key] = false;
+    event.preventDefault();
+    sendPosition();
+  }
+
+  canvas.addEventListener("click", focusCanvas);
+  window.addEventListener("keydown", handleArrowKeyDown, true);
+  window.addEventListener("keyup", handleArrowKeyUp, true);
+  window.addEventListener("blur", function () { keys = {}; });
+  focusCanvas();
 
   var wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
   socket = new ReconnectingWebSocket(

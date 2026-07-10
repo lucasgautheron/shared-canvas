@@ -7,10 +7,11 @@ import random
 from copy import deepcopy
 from datetime import datetime
 from types import SimpleNamespace
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 from dallinger import db
 from dominate import tags
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import Field, ValidationError
 from sqlalchemy import (
     Boolean,
@@ -672,28 +673,24 @@ class SharedCanvasTrial(StaticTrial):
 
     def score_canvas_game(self, participants: List[Participant]):
         group = participants[0].active_sync_groups[GROUP_TYPE]
-        game_state = CanvasGameState.query.filter_by(
-            session_id=build_session_id(self, group)
-        ).one_or_none()
+        ordered = sorted(participants, key=lambda p: p.id)
+        world = self.definition["world"]
+        game_state = CanvasGameState.get_or_create(
+            build_session_id(self, group),
+            defaults={
+                "group_id": int(group.id),
+                "network_id": self.network.id,
+                "world_id": world["world_id"],
+                "state": CanvasGameState.initial_state([p.id for p in ordered], world),
+            },
+        )
         for participant in participants:
-            if game_state is None:
-                participant.var.shared_canvas_result = {
-                    "completed_live_canvas": False,
-                    "participant_id": participant.id,
-                    "collected_coin_ids": [],
-                    "coin_bonus": 0.0,
-                    "collection_count": 0,
-                    "final_position": None,
-                    "world_id": self.definition["world"]["world_id"],
-                    "error": "missing_canvas_game_state",
-                }
-            else:
-                participant.var.shared_canvas_result = game_state.participant_result(
-                    participant.id
-                )
+            participant.var.shared_canvas_result = game_state.participant_result(
+                participant.id
+            )
 
     def format_answer(self, raw_answer, **kwargs):
-        participant = kwargs.get("participant")
+        participant = kwargs.get("participant", self.participant)
         if participant is not None:
             try:
                 result = participant.var.shared_canvas_result
@@ -919,11 +916,54 @@ class Exp(psynet.experiment.Experiment):
             "reason": "too_far",
         }
 
+    @staticmethod
+    def test_canvas_template_config_initialization():
+        template_dir = os.path.join(os.path.dirname(__file__), "templates")
+        env = Environment(
+            loader=FileSystemLoader(template_dir),
+            autoescape=select_autoescape(["html"]),
+        )
+        template = env.get_template("shared_canvas.html")
+        config = {
+            "channel": CANVAS_WS_CHANNEL,
+            "immediate": CANVAS_WS_IMMEDIATE,
+            "tolerance": CANVAS_WS_TOLERANCE,
+            "session_id": "shared_canvas:1:group:1",
+            "participant_id": 1,
+            "group_id": 1,
+            "role": "Player 1",
+            "world_id": WORLD_DEFINITIONS[0]["world_id"],
+            "canvas_size": CANVAS_SIZE,
+            "trial_seconds": TRIAL_SECONDS,
+            "send_interval_ms": SEND_INTERVAL_MS,
+            "draw_interval_ms": DRAW_INTERVAL_MS,
+            "player_radius": PLAYER_RADIUS,
+            "coin_radius": COIN_RADIUS,
+            "coin_bonus": COIN_BONUS,
+        }
+        html = template.module.shared_canvas_control(SimpleNamespace(game_config=config))
+        config_line = next(
+            line.strip()
+            for line in html.splitlines()
+            if line.strip().startswith("var cfg =")
+        )
+        assert config_line.startswith("var cfg = {")
+        assert "&#" not in config_line
+        assert '"channel": "shared_canvas_live"' in config_line
+        assert '"immediate": true' in config_line
+        assert 'tabindex="0"' in html
+        assert 'aria-label="Shared canvas arrow-key navigation area"' in html
+        assert 'window.addEventListener("keydown", handleArrowKeyDown, true);' in html
+        assert 'window.addEventListener("keyup", handleArrowKeyUp, true);' in html
+        assert 'canvas.addEventListener("click", focusCanvas);' in html
+        assert "if (!wasPressed) {" in html
+
     def test_canvas_websocket_contracts(self):
         self.test_websocket_event_parsing()
         self.test_canvas_state_transitions()
         self.test_websocket_event_authorization()
         self.test_server_event_serialization()
+        self.test_canvas_template_config_initialization()
 
     def test_serial_run_bots(self, bots: List[BotDriver]):
         self.test_canvas_websocket_contracts()
@@ -951,6 +991,7 @@ class Exp(psynet.experiment.Experiment):
             assert answer["completed_live_canvas"] is True
             assert answer["coin_bonus"] == 0.0
             assert answer["collected_coin_ids"] == []
+            assert answer["participant_id"] == bot.id
             participant = Participant.query.get(bot.id)
             group_id = int(participant.active_sync_groups[GROUP_TYPE].id)
             answers_by_group.setdefault(group_id, []).append(answer)

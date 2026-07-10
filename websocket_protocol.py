@@ -18,6 +18,16 @@ from psynet.utils import get_logger
 
 logger = get_logger()
 
+# TODO: Add private WebSocket delivery in a follow-up PR.
+# Dallinger currently relays every Redis message on a channel to every browser
+# socket subscribed to that channel, so client-side ``target`` filtering is not
+# a privacy boundary. A proper solution should split browser publish and
+# subscribe channels, let the experiment subscribe to command channels, and
+# let services publish server events to participant-specific private receive
+# channels. Private channel access should use unguessable names or signed
+# channel-authorization tokens, and PsyNet can then expose a helper such as
+# ``publish_to_participant(participant_id, event)``.
+
 
 class ClientWebSocketEvent(BaseModel):
     """A browser-authored event authorized against the current PsyNet page."""
@@ -110,6 +120,30 @@ def extract_websocket_event_type(message):
     return event_type
 
 
+def _extract_websocket_participant_id(message):
+    """Extract a participant ID from a raw WebSocket JSON message, if present."""
+    try:
+        data = json.loads(message)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    participant_id = data.get("sender") or data.get("participant_id")
+    client = data.get("client")
+    if participant_id is None and isinstance(client, dict):
+        participant_id = client.get("participant_id")
+
+    if participant_id in (None, ""):
+        return None
+
+    try:
+        return int(participant_id)
+    except (TypeError, ValueError):
+        return None
+
+
 class WebSocketEventService:
     """Parse, authorize, and dispatch WebSocket events for one request context."""
 
@@ -157,7 +191,7 @@ class WebSocketEventService:
 
     def dispatch(self, message):
         """Parse and dispatch a raw WebSocket message."""
-        event = self.parse_event(message)
+        event = self.parse_event(message).with_receive_time(self.receive_time)
         return self.dispatch_event(event)
 
     def dispatch_event(self, event):
@@ -209,14 +243,33 @@ class ValidatedWebSocketElt(WebSocketElt):
 
     service_class = WebSocketEventService
 
+    def resolve_participant(self, message):
+        """Resolve a participant from a raw WebSocket message."""
+        participant_id = _extract_websocket_participant_id(message)
+        if participant_id is None:
+            return None
+
+        from psynet.participant import Participant
+
+        return Participant.query.get(participant_id)
+
     def handle_message(
         self, message, channel_name, participant, node, receive_time, experiment
     ):
         """Parse, authorize, and dispatch an incoming WebSocket message."""
         if participant is None:
+            participant = self.resolve_participant(message)
+
+        if participant is None:
+            try:
+                event = self.service_class.parse_event(message)
+            except (ValidationError, ValueError):
+                return
+
             warn_rejected_websocket_event(
                 "missing participant",
                 channel=channel_name or self.channel,
+                event=event,
                 label=self.service_class.get_rejection_log_label(),
             )
             return
@@ -234,8 +287,7 @@ class ValidatedWebSocketElt(WebSocketElt):
             service.warn_rejected_event("validation failed", error=err)
             return
 
-        event = event.with_receive_time(receive_time)
-        service.dispatch_event(event)
+        service.dispatch_event(event.with_receive_time(receive_time))
 
 
 def warn_rejected_websocket_event(
