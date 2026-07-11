@@ -1,7 +1,7 @@
 {% macro shared_canvas_control(params) %}
 <style>
   .canvas-shell {
-    max-width: 760px;
+    max-width: 1040px;
     margin: 0 auto;
     font-family: system-ui, sans-serif;
     text-align: center;
@@ -18,12 +18,34 @@
     font-weight: 700;
   }
   #shared-canvas {
-    width: min(640px, 92vw);
-    height: min(640px, 92vw);
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    height: auto;
     border: 2px solid #22334d;
     border-radius: 14px;
     background: #f8fbff;
     box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+  }
+  .canvas-stage {
+    position: relative;
+    display: inline-block;
+    width: min(1000px, 96vw);
+  }
+  .waiting-overlay {
+    position: absolute;
+    inset: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+    background: rgba(248, 251, 255, 0.92);
+    color: #22334d;
+    font-size: 1.2rem;
+    font-weight: 700;
+    pointer-events: none;
+  }
+  .waiting-overlay.hidden {
+    display: none;
   }
   #shared-canvas:focus {
     outline: 3px solid #4f8cff;
@@ -34,45 +56,221 @@
     max-width: 620px;
     color: #52606d;
   }
+  .canvas-legend {
+    margin: 0.35rem auto 0;
+    max-width: 620px;
+    color: #52606d;
+    font-size: 0.9rem;
+  }
+  .zoom-control {
+    margin: 0.55rem auto 0;
+    max-width: 620px;
+    color: #52606d;
+    font-size: 0.9rem;
+  }
+  .zoom-control input {
+    width: min(420px, 80vw);
+    vertical-align: middle;
+  }
 </style>
 <div class="canvas-shell">
-  <h2>Shared canvas</h2>
   <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
-  <canvas id="shared-canvas" width="{{ params.game_config.canvas_size }}" height="{{ params.game_config.canvas_size }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
-  <p class="canvas-help">Use the arrow keys to move. Collect the gold coins before the session ends.</p>
+  <div class="canvas-stage">
+    <canvas id="shared-canvas" width="{{ params.game_config.canvas_width }}" height="{{ params.game_config.canvas_height }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
+    <div id="waiting-overlay" class="waiting-overlay">Waiting for other participants...</div>
+  </div>
+  <div class="zoom-control">
+    View width: <span id="zoom-label">300</span> miles
+    <br>
+    <input id="zoom-slider" type="range" min="200" max="1500" step="25" value="750" aria-label="Map view width in miles">
+  </div>
+  <p class="canvas-help">Use the arrow keys to move. Follow colored potential markers and shaded zones to find coins before the session ends.</p>
+  <p class="canvas-legend">Brighter potential markers are more promising. Shaded zones show areas worth considering right now.</p>
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
   var cfg = {{ params.game_config | tojson }};
   var canvas = document.getElementById("shared-canvas");
   var ctx = canvas.getContext("2d");
+  var waitingOverlay = document.getElementById("waiting-overlay");
+  var canvasWidth = Number(cfg.canvas_width || canvas.width || cfg.canvas_size);
+  var canvasHeight = Number(cfg.canvas_height || canvas.height || cfg.canvas_size);
+  var zoomSlider = document.getElementById("zoom-slider");
+  var zoomLabel = document.getElementById("zoom-label");
   var socket = null;
+  var initialPlayers = cfg.initial_players || {};
   var players = {};
-  var coins = [];
-  var pendingCollections = {};
+  var maxActivePotential = 1200;
+  var pxPerMile = Number((cfg.projection || {}).px_per_mile || 1);
+  var borderMarginMiles = 25;
+  var viewportMiles = 750;
+  var camera = {x: 0, y: 0, initialized: false};
+  var stormPoints = (cfg.storm_points || []).slice();
+  var stormCursor = 0;
+  var activePotential = [];
+  var lastPotentialTime = 0;
+  var chaserTracks = (cfg.chaser_tracks || []).slice();
+  var chaserTrackVisibleMs = Number(cfg.chaser_track_visible_ms || 30 * 60 * 1000);
+  var warnings = (cfg.warnings || []).slice();
+  var rewardEvents = (cfg.reward_events || []).slice();
+  var timing = cfg.timing || {};
+  var serverStartedAt = null;
+  var gameEndsAt = null;
   var collectedCoinIds = [];
+  var pendingCollectionIds = {};
   var keys = {};
   var arrowKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
   var own = {
     participant_id: String(cfg.participant_id),
     label: cfg.role,
     color: "#1f77b4",
-    x: cfg.canvas_size / 2,
-    y: cfg.canvas_size / 2,
+    x: Number((cfg.initial_player || {}).x || cfg.canvas_size / 2),
+    y: Number((cfg.initial_player || {}).y || cfg.canvas_size / 2),
     vx: 0,
     vy: 0,
     client_time: performance.now(),
     received_at: performance.now()
   };
+  own = Object.assign(own, cfg.initial_player || {});
   var bonus = 0;
   var lastDrawAt = performance.now();
   var startedAt = performance.now();
   var submitted = false;
+  var snapshotApplied = false;
+  var readySent = false;
+  var gameStarted = false;
+
+  Object.keys(initialPlayers).forEach(function (participantId) {
+    players[String(participantId)] = Object.assign({}, initialPlayers[participantId], {
+      received_at: performance.now()
+    });
+  });
+  players[String(cfg.participant_id)] = Object.assign({}, own);
+
+  function gameTime(now) {
+    if (serverStartedAt == null) return 0;
+    return Math.min(cfg.trial_seconds * 1000, Math.max(0, now - serverStartedAt));
+  }
+
+  function rawTimeForGameTime(t) {
+    var rawMin = Number(timing.raw_time_min_ms);
+    var rawMax = Number(timing.raw_time_max_ms);
+    var gameEnd = Number(timing.game_end_ms || cfg.trial_seconds * 1000);
+    if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax) || rawMax <= rawMin || gameEnd <= 0) {
+      return null;
+    }
+    return rawMin + Math.max(0, Math.min(1, Number(t || 0) / gameEnd)) * (rawMax - rawMin);
+  }
+
+  function updateWaitingOverlay(readyIds) {
+    if (!waitingOverlay) return;
+    waitingOverlay.classList.toggle("hidden", gameStarted);
+    if (!gameStarted) {
+      var readyCount = Array.isArray(readyIds) ? readyIds.length : 0;
+      waitingOverlay.textContent = readyCount > 0
+        ? "Waiting for other participants... (" + readyCount + " ready)"
+        : "Waiting for other participants...";
+    }
+  }
+
+  function applyServerStartTime(serverStartRaw, now, allowLargeJump) {
+    if (!serverStartRaw) return;
+    if (serverStartedAt != null && !allowLargeJump) return;
+    serverStartedAt = now;
+    gameStarted = true;
+    if (gameEndsAt == null) {
+      gameEndsAt = now + cfg.trial_seconds * 1000;
+    }
+    lastDrawAt = now;
+    stormCursor = 0;
+    activePotential = [];
+    lastPotentialTime = 0;
+    updateWaitingOverlay();
+  }
+
+  function sendReady() {
+    if (readySent || gameStarted || !snapshotApplied) return;
+    readySent = true;
+    wsSend({type: "ready"});
+    updateWaitingOverlay([String(cfg.participant_id)]);
+  }
+
+  function viewportWorldWidth() {
+    return Math.max(1, viewportMiles * pxPerMile);
+  }
+
+  function viewportWorldHeight() {
+    return viewportWorldWidth() * canvasHeight / canvasWidth;
+  }
+
+  function screenScale() {
+    return canvasWidth / viewportWorldWidth();
+  }
+
+  function clampCamera() {
+    var width = viewportWorldWidth();
+    var height = viewportWorldHeight();
+    if (width >= cfg.canvas_size) {
+      camera.x = (cfg.canvas_size - width) / 2;
+    } else {
+      camera.x = Math.max(0, Math.min(cfg.canvas_size - width, camera.x));
+    }
+    if (height >= cfg.canvas_size) {
+      camera.y = (cfg.canvas_size - height) / 2;
+    } else {
+      camera.y = Math.max(0, Math.min(cfg.canvas_size - height, camera.y));
+    }
+  }
+
+  function centerCameraOn(player) {
+    camera.x = Number(player.x || 0) - viewportWorldWidth() / 2;
+    camera.y = Number(player.y || 0) - viewportWorldHeight() / 2;
+    camera.initialized = true;
+    clampCamera();
+  }
+
+  function updateCameraForPlayer(player) {
+    if (!player) return;
+    if (!camera.initialized) {
+      centerCameraOn(player);
+      return;
+    }
+    var width = viewportWorldWidth();
+    var height = viewportWorldHeight();
+    var margin = Math.min(width / 2, height / 2, borderMarginMiles * pxPerMile);
+    var x = Number(player.x || 0);
+    var y = Number(player.y || 0);
+    if (x < camera.x + margin) camera.x = x - margin;
+    if (x > camera.x + width - margin) camera.x = x - width + margin;
+    if (y < camera.y + margin) camera.y = y - margin;
+    if (y > camera.y + height - margin) camera.y = y - height + margin;
+    clampCamera();
+  }
+
+  function worldToScreen(x, y) {
+    var scale = screenScale();
+    return {
+      x: (Number(x) - camera.x) * scale,
+      y: (Number(y) - camera.y) * scale
+    };
+  }
+
+  function worldLengthToScreen(length) {
+    return Number(length || 0) * screenScale();
+  }
+
+  function isOnScreen(point, pad) {
+    var padding = pad || 0;
+    return point.x >= -padding && point.x <= canvasWidth + padding &&
+      point.y >= -padding && point.y <= canvasHeight + padding;
+  }
 
   function wsSend(payload) {
+    if (submitted) return;
     if (socket && socket.readyState === WebSocket.OPEN) {
       var message = Object.assign({
         session_id: cfg.session_id,
+        group_id: Number(cfg.group_id),
         page_uuid: pageUuid,
         sender: String(cfg.participant_id),
         immediate: Boolean(cfg.immediate)
@@ -97,35 +295,47 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function applySnapshot(msg) {
-    players = {};
-    Object.keys(msg.players || {}).forEach(function (participantId) {
-      var player = msg.players[participantId];
-      players[String(participantId)] = Object.assign({}, player, {
-        received_at: performance.now()
-      });
-    });
-    if (players[String(cfg.participant_id)]) {
-      own = Object.assign(own, players[String(cfg.participant_id)]);
-    }
-    coins = (msg.coins || []).slice();
+    var now = performance.now();
+    timing = msg.timing || timing;
     var bonuses = msg.bonuses || {};
     updateBonus(bonuses[String(cfg.participant_id)] || 0);
+    if (!snapshotApplied) {
+      updateCameraForPlayer(own);
+    }
+    snapshotApplied = true;
+    updateWaitingOverlay(msg.ready_participant_ids || []);
+    sendReady();
+  }
+
+  function applyReadyStatus(msg) {
+    updateWaitingOverlay(msg.ready_participant_ids || []);
+  }
+
+  function applyGameStarted(msg) {
+    if (!readySent) return;
+    timing = msg.timing || timing;
+    applyServerStartTime(timing.server_start_time, performance.now(), true);
+    updateWaitingOverlay(msg.ready_participant_ids || []);
   }
 
   function applyPosition(player) {
     var participantId = String(player.participant_id);
     if (participantId === String(cfg.participant_id)) return;
-    players[participantId] = Object.assign({}, player, {received_at: performance.now()});
+    players[participantId] = Object.assign({}, players[participantId] || {}, player, {
+      received_at: performance.now()
+    });
   }
 
   function applyCollection(msg) {
     var collection = msg.collection || {};
-    coins = (msg.coins || coins).filter(function (coin) {
-      return coin.id !== collection.coin_id;
-    });
-    delete pendingCollections[collection.coin_id];
+    var targetId = String(collection.target_id || collection.coin_id || "");
+    if (targetId) {
+      delete pendingCollectionIds[targetId];
+    }
     if (String(collection.participant_id) === String(cfg.participant_id)) {
-      collectedCoinIds.push(collection.coin_id);
+      if (targetId && collectedCoinIds.indexOf(targetId) < 0) {
+        collectedCoinIds.push(targetId);
+      }
       updateBonus((msg.bonuses || {})[String(cfg.participant_id)] || (bonus + cfg.coin_bonus));
     } else if (msg.bonuses) {
       updateBonus(msg.bonuses[String(cfg.participant_id)] || bonus);
@@ -133,14 +343,19 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function handleCollectRejected(msg) {
-    delete pendingCollections[msg.coin_id];
+    if (msg.coin_id) delete pendingCollectionIds[msg.coin_id];
+    return msg;
   }
 
   function integrateOwnPlayer(now) {
+    if (!gameStarted) {
+      lastDrawAt = now;
+      return;
+    }
     var dt = Math.min(0.08, (now - lastDrawAt) / 1000);
     var acceleration = 900;
     var friction = 0.90;
-    var maxSpeed = 260;
+    var maxSpeed = Number(cfg.max_player_speed || 0);
     var ax = 0;
     var ay = 0;
     if (keys.ArrowLeft) ax -= acceleration;
@@ -161,6 +376,7 @@ document.addEventListener("DOMContentLoaded", function () {
     own.client_time = now;
     own.received_at = now;
     players[String(cfg.participant_id)] = Object.assign({}, own);
+    updateCameraForPlayer(own);
   }
 
   function renderedPlayer(player, now) {
@@ -171,70 +387,317 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   }
 
-  function draw(now) {
-    integrateOwnPlayer(now);
-    ctx.clearRect(0, 0, cfg.canvas_size, cfg.canvas_size);
-    ctx.fillStyle = "#f8fbff";
-    ctx.fillRect(0, 0, cfg.canvas_size, cfg.canvas_size);
+  function bsLastLe(points, t) {
+    var lo = 0;
+    var hi = points.length - 1;
+    var result = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (Number(points[mid][0]) <= t) {
+        result = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return result;
+  }
+
+  function lerp(a, b, t) {
+    return Math.round(a + (b - a) * t);
+  }
+
+  function hexToRgb(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+
+  function interpolateColor(stops, value) {
+    if (value == null || Number.isNaN(Number(value))) return "#377eb8";
+    var numeric = Number(value);
+    if (numeric <= stops[0][0]) return stops[0][1];
+    for (var i = 1; i < stops.length; i++) {
+      if (numeric <= stops[i][0]) {
+        var x0 = stops[i - 1][0];
+        var c0 = hexToRgb(stops[i - 1][1]);
+        var x1 = stops[i][0];
+        var c1 = hexToRgb(stops[i][1]);
+        var amount = (numeric - x0) / Math.max(1e-9, x1 - x0);
+        return "rgb(" + lerp(c0[0], c1[0], amount) + "," +
+          lerp(c0[1], c1[1], amount) + "," + lerp(c0[2], c1[2], amount) + ")";
+      }
+    }
+    return stops[stops.length - 1][1];
+  }
+
+  function potentialColor(vil) {
+    return interpolateColor([
+      [0, "#377eb8"],
+      [10, "#4daf4a"],
+      [25, "#ffcc33"],
+      [45, "#ff7f00"],
+      [65, "#e41a1c"],
+      [85, "#984ea3"]
+    ], vil);
+  }
+
+  function zoneColor(eventName) {
+    var event = String(eventName || "").toLowerCase();
+    if (event.indexOf("tornado") >= 0) return "rgba(228, 26, 28, 0.30)";
+    if (event.indexOf("severe") >= 0) return "rgba(255, 204, 51, 0.26)";
+    return "rgba(55, 126, 184, 0.22)";
+  }
+
+  function drawWorldGrid() {
+    var step = Math.max(1, 50 * pxPerMile);
+    var width = viewportWorldWidth();
+    var height = viewportWorldHeight();
+    var xStart = Math.floor(camera.x / step) * step;
+    var yStart = Math.floor(camera.y / step) * step;
     ctx.strokeStyle = "#d8e2ef";
     ctx.lineWidth = 1;
-    for (var grid = 80; grid < cfg.canvas_size; grid += 80) {
+    for (var x = xStart; x <= camera.x + width; x += step) {
+      var sx = worldToScreen(x, camera.y).x;
       ctx.beginPath();
-      ctx.moveTo(grid, 0);
-      ctx.lineTo(grid, 0 + cfg.canvas_size);
-      ctx.moveTo(0, grid);
-      ctx.lineTo(cfg.canvas_size, grid);
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, canvasHeight);
       ctx.stroke();
     }
-    coins.forEach(function (coin) {
+    for (var y = yStart; y <= camera.y + height; y += step) {
+      var sy = worldToScreen(camera.x, y).y;
       ctx.beginPath();
-      ctx.arc(coin.x, coin.y, coin.radius || cfg.coin_radius, 0, Math.PI * 2);
+      ctx.moveTo(0, sy);
+      ctx.lineTo(canvasWidth, sy);
+      ctx.stroke();
+    }
+  }
+
+  function drawZones(t) {
+    warnings.forEach(function (zone) {
+      if (Number(zone.eff_ms) > t || Number(zone.exp_ms) < t) return;
+      (zone.polygons || []).forEach(function (polygon) {
+        if (!polygon.length) return;
+        ctx.beginPath();
+        polygon.forEach(function (point, index) {
+          var screen = worldToScreen(point[0], point[1]);
+          if (index === 0) ctx.moveTo(screen.x, screen.y);
+          else ctx.lineTo(screen.x, screen.y);
+        });
+        ctx.closePath();
+        ctx.fillStyle = zoneColor(zone.event);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(40, 40, 40, 0.65)";
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      });
+    });
+  }
+
+  function drawChaserTracks(t) {
+    var colors = ["#2563eb", "#7c3aed", "#0891b2", "#db2777", "#059669", "#ea580c"];
+    var currentRawMs = rawTimeForGameTime(t);
+    var minRawMs = currentRawMs == null ? null : currentRawMs - chaserTrackVisibleMs;
+    chaserTracks.forEach(function (track, trackIndex) {
+      var visiblePoints = (track.points || []).filter(function (point) {
+        var rawMs = Number(point[3]);
+        if (Number(point[0]) > t) return false;
+        if (minRawMs == null || !Number.isFinite(rawMs)) return true;
+        return rawMs >= minRawMs && rawMs <= currentRawMs;
+      });
+      if (visiblePoints.length < 1) return;
+      var color = colors[trackIndex % colors.length];
+      ctx.save();
+      if (visiblePoints.length >= 2) {
+        ctx.beginPath();
+        visiblePoints.forEach(function (point, index) {
+          var screen = worldToScreen(point[1], point[2]);
+          if (index === 0) ctx.moveTo(screen.x, screen.y);
+          else ctx.lineTo(screen.x, screen.y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.78;
+        ctx.stroke();
+      }
+      var lastPoint = visiblePoints[visiblePoints.length - 1];
+      var marker = worldToScreen(lastPoint[1], lastPoint[2]);
+      if (isOnScreen(marker, 8)) {
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        ctx.arc(marker.x, marker.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }
+
+  function advancePotential(t) {
+    if (t < lastPotentialTime) {
+      stormCursor = 0;
+      activePotential = [];
+    }
+    lastPotentialTime = t;
+    while (stormCursor < stormPoints.length && Number(stormPoints[stormCursor][0]) <= t) {
+      activePotential.push(stormPoints[stormCursor]);
+      stormCursor += 1;
+    }
+    activePotential = activePotential.filter(function (point) {
+      return Number(point[1]) >= t;
+    });
+  }
+
+  function drawPotential(t) {
+    advancePotential(t);
+    var visiblePotential = activePotential.map(function (point) {
+      return {point: point, screen: worldToScreen(point[2], point[3])};
+    }).filter(function (entry) {
+      return isOnScreen(entry.screen, 24);
+    });
+    if (visiblePotential.length > maxActivePotential) {
+      visiblePotential = visiblePotential.slice().sort(function (a, b) {
+        return Number(b.point[4] || 0) - Number(a.point[4] || 0);
+      }).slice(0, maxActivePotential);
+    }
+    visiblePotential.forEach(function (entry) {
+      var point = entry.point;
+      var screen = entry.screen;
+      var vil = point[4];
+      var color = potentialColor(vil);
+      var size = Math.max(8, Math.min(cfg.player_radius * 1.6, 7 + Number(vil || 0) * 0.12));
+      var half = size / 2;
+      ctx.fillStyle = color;
+      ctx.fillRect(screen.x - half, screen.y - half, size, size);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.75)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(screen.x - half, screen.y - half, size, size);
+    });
+  }
+
+  function drawRewardEvents(t) {
+    rewardEvents.forEach(function (event) {
+      if (Number(event.start_ms) > t || Number(event.end_ms) < t) return;
+      var screen = worldToScreen(event.x, event.y);
+      var radius = Math.max(1, Number(event.radius || cfg.coin_radius) * screenScale());
+      if (!isOnScreen(screen, radius + 20)) return;
+      ctx.save();
+      if (event.line && event.line.length >= 2) {
+        ctx.beginPath();
+        event.line.forEach(function (point, index) {
+          var linePoint = worldToScreen(point[0], point[1]);
+          if (index === 0) ctx.moveTo(linePoint.x, linePoint.y);
+          else ctx.lineTo(linePoint.x, linePoint.y);
+        });
+        ctx.strokeStyle = "rgba(244, 196, 48, 0.85)";
+        ctx.lineWidth = 4;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
       ctx.fillStyle = "#f4c430";
       ctx.fill();
       ctx.strokeStyle = "#a27400";
       ctx.lineWidth = 2;
       ctx.stroke();
+      ctx.restore();
     });
+  }
+
+  function distanceToSegment(px, py, ax, ay, bx, by) {
+    var dx = bx - ax;
+    var dy = by - ay;
+    if (dx === 0 && dy === 0) return Math.hypot(px - ax, py - ay);
+    var amount = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+    amount = Math.max(0, Math.min(1, amount));
+    return Math.hypot(px - (ax + amount * dx), py - (ay + amount * dy));
+  }
+
+  function distanceToRewardEvent(event) {
+    var distances = [Math.hypot(Number(event.x) - own.x, Number(event.y) - own.y)];
+    var line = event.line || [];
+    for (var i = 0; i < line.length - 1; i++) {
+      distances.push(distanceToSegment(
+        own.x,
+        own.y,
+        Number(line[i][0]),
+        Number(line[i][1]),
+        Number(line[i + 1][0]),
+        Number(line[i + 1][1])
+      ));
+    }
+    return Math.min.apply(null, distances);
+  }
+
+  function checkRewardCollections(t, now) {
+    rewardEvents.forEach(function (event) {
+      var eventId = String(event.id);
+      if (pendingCollectionIds[eventId]) return;
+      if (collectedCoinIds.indexOf(eventId) >= 0) return;
+      if (Number(event.start_ms) > t || Number(event.end_ms) < t) return;
+      var collectRadius = Number(event.radius || cfg.coin_radius);
+      if (distanceToRewardEvent(event) > collectRadius) return;
+      pendingCollectionIds[eventId] = true;
+      wsSend({
+        type: "collect",
+        coin_id: eventId,
+        x: own.x,
+        y: own.y,
+        client_time: now,
+        game_time_ms: t
+      });
+    });
+  }
+
+  function draw(now) {
+    if (!gameStarted) {
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+      ctx.fillStyle = "#f8fbff";
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+      lastDrawAt = now;
+      return;
+    }
+    integrateOwnPlayer(now);
+    var t = gameTime(now);
+    checkRewardCollections(t, now);
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    ctx.fillStyle = "#f8fbff";
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    drawWorldGrid();
+    drawZones(t);
+    drawChaserTracks(t);
+    drawPotential(t);
+    drawRewardEvents(t);
     Object.keys(players).forEach(function (participantId) {
       var player = renderedPlayer(players[participantId], now);
       var isOwn = String(participantId) === String(cfg.participant_id);
+      var screen = worldToScreen(player.x, player.y);
+      if (!isOnScreen(screen, cfg.player_radius + 6)) return;
       ctx.beginPath();
-      ctx.arc(player.x, player.y, cfg.player_radius, 0, Math.PI * 2);
+      ctx.arc(screen.x, screen.y, cfg.player_radius, 0, Math.PI * 2);
       ctx.fillStyle = player.color || (isOwn ? "#1f77b4" : "#d62728");
       ctx.fill();
       ctx.lineWidth = isOwn ? 4 : 2;
       ctx.strokeStyle = isOwn ? "#111827" : "#ffffff";
       ctx.stroke();
     });
-    checkCoinCollections();
     lastDrawAt = now;
   }
 
-  function checkCoinCollections() {
-    coins.forEach(function (coin) {
-      if (pendingCollections[coin.id]) return;
-      var distance = Math.hypot(Number(coin.x) - own.x, Number(coin.y) - own.y);
-      if (distance <= (coin.radius || cfg.coin_radius) + cfg.player_radius) {
-        pendingCollections[coin.id] = true;
-        wsSend({
-          type: "collect",
-          coin_id: coin.id,
-          x: own.x,
-          y: own.y,
-          client_time: performance.now()
-        });
-      }
-    });
-  }
-
   function sendPosition() {
+    if (!gameStarted) return;
+    var now = performance.now();
     wsSend({
       type: "position",
       x: own.x,
       y: own.y,
       vx: own.vx,
       vy: own.vy,
-      client_time: performance.now(),
+      client_time: now,
+      game_time_ms: gameTime(now),
       low_latency: true
     });
   }
@@ -242,6 +705,7 @@ document.addEventListener("DOMContentLoaded", function () {
   function submitFinalAnswer() {
     if (submitted) return;
     submitted = true;
+    cleanup(true);
     psynet.nextPage({
       completed_live_canvas_browser: true,
       client_collected_coin_ids: collectedCoinIds,
@@ -255,6 +719,17 @@ document.addEventListener("DOMContentLoaded", function () {
     if (document.activeElement !== canvas) {
       canvas.focus();
     }
+  }
+
+  function updateZoomLabel() {
+    if (zoomLabel) zoomLabel.textContent = String(Math.round(viewportMiles));
+  }
+
+  function handleZoomChange() {
+    viewportMiles = Number(zoomSlider.value || 200);
+    updateZoomLabel();
+    centerCameraOn(own);
+    draw(performance.now());
   }
 
   function arrowKeyForEvent(event) {
@@ -275,6 +750,7 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!key) return;
     event.preventDefault();
     focusCanvas();
+    if (!gameStarted) return;
     var wasPressed = Boolean(keys[key]);
     keys[key] = true;
     if (!wasPressed) {
@@ -288,24 +764,45 @@ document.addEventListener("DOMContentLoaded", function () {
     if (!key) return;
     keys[key] = false;
     event.preventDefault();
+    if (!gameStarted) return;
     sendPosition();
   }
 
   canvas.addEventListener("click", focusCanvas);
+  if (zoomSlider) {
+    viewportMiles = Number(zoomSlider.value || 200);
+    updateZoomLabel();
+    zoomSlider.addEventListener("input", handleZoomChange);
+  }
   window.addEventListener("keydown", handleArrowKeyDown, true);
   window.addEventListener("keyup", handleArrowKeyUp, true);
   window.addEventListener("blur", function () { keys = {}; });
   focusCanvas();
 
   var wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
-  socket = new ReconnectingWebSocket(
-    wsScheme + location.host + "/chat?channel=" + cfg.channel
-    + "&worker_id=" + dallinger.identity.workerId
-    + "&participant_id=" + cfg.participant_id
-    + "&tolerance=" + encodeURIComponent(String(cfg.tolerance))
-  );
+  var wsParams = new URLSearchParams({
+    channel: String(cfg.channel),
+    worker_id: String((window.dallinger && dallinger.identity && dallinger.identity.workerId) || ""),
+    participant_id: String(cfg.participant_id),
+    tolerance: String(cfg.tolerance)
+  });
+  var wsUrl = wsScheme + location.host + "/chat?" + wsParams.toString();
+  socket = new ReconnectingWebSocket(wsUrl);
   socket.onopen = function () {
+    if (submitted) return;
     wsSend({type: "state_request"});
+  };
+  socket.onerror = function (event) {
+    console.warn("Shared canvas websocket error", {url: wsUrl, event: event});
+  };
+  socket.onclose = function (event) {
+    if (!submitted) {
+      console.warn("Shared canvas websocket closed", {
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean
+      });
+    }
   };
   socket.onmessage = function (event) {
     if (event.data.indexOf(cfg.channel + ":") !== 0) return;
@@ -326,6 +823,10 @@ document.addEventListener("DOMContentLoaded", function () {
         Number(msg.group_id) !== Number(cfg.group_id)) return;
     if (msg.type === "state_snapshot") {
       applySnapshot(msg);
+    } else if (msg.type === "ready_status") {
+      applyReadyStatus(msg);
+    } else if (msg.type === "game_started") {
+      applyGameStarted(msg);
     } else if (msg.type === "position_update") {
       applyPosition(msg.player);
     } else if (msg.type === "coin_collected") {
@@ -335,11 +836,29 @@ document.addEventListener("DOMContentLoaded", function () {
     }
   };
 
-  setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);
-  setInterval(sendPosition, cfg.send_interval_ms);
-  setInterval(function () {
-    if (performance.now() - startedAt >= cfg.trial_seconds * 1000) submitFinalAnswer();
+  var drawInterval = setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);
+  var sendInterval = setInterval(sendPosition, cfg.send_interval_ms);
+  var completionInterval = setInterval(function () {
+    var now = performance.now();
+    if (gameEndsAt != null && now >= gameEndsAt) submitFinalAnswer();
   }, 200);
+
+  function cleanup(closeSocket) {
+    clearInterval(drawInterval);
+    clearInterval(sendInterval);
+    clearInterval(completionInterval);
+    window.removeEventListener("keydown", handleArrowKeyDown, true);
+    window.removeEventListener("keyup", handleArrowKeyUp, true);
+    if (closeSocket && socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.close();
+    }
+  }
+
+  window.addEventListener("beforeunload", function () { cleanup(true); });
 });
 </script>
 {% endmacro %}
