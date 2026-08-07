@@ -76,7 +76,7 @@
 <div class="canvas-shell">
   <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
   <div class="canvas-stage">
-    <canvas id="shared-canvas" width="{{ params.game_config.canvas_width }}" height="{{ params.game_config.canvas_height }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
+    <canvas id="shared-canvas" width="{{ params.live_session_config.canvas_width }}" height="{{ params.live_session_config.canvas_height }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
     <div id="waiting-overlay" class="waiting-overlay">Waiting for other participants...</div>
   </div>
   <div class="zoom-control">
@@ -89,7 +89,8 @@
 </div>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
-  var cfg = {{ params.game_config | tojson }};
+  var liveSession = {{ params.live_session_config | tojson }};
+  var cfg = liveSession;
   var canvas = document.getElementById("shared-canvas");
   var ctx = canvas.getContext("2d");
   var waitingOverlay = document.getElementById("waiting-overlay");
@@ -97,7 +98,6 @@ document.addEventListener("DOMContentLoaded", function () {
   var canvasHeight = Number(cfg.canvas_height || canvas.height || cfg.canvas_size);
   var zoomSlider = document.getElementById("zoom-slider");
   var zoomLabel = document.getElementById("zoom-label");
-  var socket = null;
   var initialPlayers = cfg.initial_players || {};
   var players = {};
   var maxActivePotential = 1200;
@@ -137,7 +137,6 @@ document.addEventListener("DOMContentLoaded", function () {
   var startedAt = performance.now();
   var submitted = false;
   var snapshotApplied = false;
-  var readySent = false;
   var gameStarted = false;
 
   Object.keys(initialPlayers).forEach(function (participantId) {
@@ -186,13 +185,6 @@ document.addEventListener("DOMContentLoaded", function () {
     activePotential = [];
     lastPotentialTime = 0;
     updateWaitingOverlay();
-  }
-
-  function sendReady() {
-    if (readySent || gameStarted || !snapshotApplied) return;
-    readySent = true;
-    wsSend({type: "ready"});
-    updateWaitingOverlay([String(cfg.participant_id)]);
   }
 
   function viewportWorldWidth() {
@@ -267,16 +259,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function wsSend(payload) {
     if (submitted) return;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      var message = Object.assign({
-        session_id: cfg.session_id,
-        group_id: Number(cfg.group_id),
-        page_uuid: pageUuid,
-        sender: String(cfg.participant_id),
-        immediate: Boolean(cfg.immediate)
-      }, payload);
-      socket.send(cfg.channel + ":" + JSON.stringify(message));
-    }
+    var type = payload.type;
+    if (!type) return;
+    var message = Object.assign({}, payload);
+    delete message.type;
+    psynet.websocket.send(type, message);
   }
 
   function updateBonus(value) {
@@ -295,26 +282,28 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   function applySnapshot(msg) {
+    var state = msg.state || {};
     var now = performance.now();
     timing = msg.timing || timing;
-    var bonuses = msg.bonuses || {};
+    if (state.server_start_time) {
+      timing.server_start_time = state.server_start_time;
+    }
+    var bonuses = state.bonuses || {};
     updateBonus(bonuses[String(cfg.participant_id)] || 0);
+    collectedCoinIds = (state.collected_coins || [])
+      .filter(function (collection) {
+        return String(collection.participant_id) === String(cfg.participant_id);
+      })
+      .map(function (collection) {
+        return String(collection.coin_id);
+      });
+    if (msg.started) {
+      applyServerStartTime(timing.server_start_time, now, true);
+    }
     if (!snapshotApplied) {
       updateCameraForPlayer(own);
     }
     snapshotApplied = true;
-    updateWaitingOverlay(msg.ready_participant_ids || []);
-    sendReady();
-  }
-
-  function applyReadyStatus(msg) {
-    updateWaitingOverlay(msg.ready_participant_ids || []);
-  }
-
-  function applyGameStarted(msg) {
-    if (!readySent) return;
-    timing = msg.timing || timing;
-    applyServerStartTime(timing.server_start_time, performance.now(), true);
     updateWaitingOverlay(msg.ready_participant_ids || []);
   }
 
@@ -779,62 +768,21 @@ document.addEventListener("DOMContentLoaded", function () {
   window.addEventListener("blur", function () { keys = {}; });
   focusCanvas();
 
-  var wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
-  var wsParams = new URLSearchParams({
-    channel: String(cfg.channel),
-    worker_id: String((window.dallinger && dallinger.identity && dallinger.identity.workerId) || ""),
-    participant_id: String(cfg.participant_id),
-    tolerance: String(cfg.tolerance)
-  });
-  var wsUrl = wsScheme + location.host + "/chat?" + wsParams.toString();
-  socket = new ReconnectingWebSocket(wsUrl);
-  socket.onopen = function () {
-    if (submitted) return;
-    wsSend({type: "state_request"});
-  };
-  socket.onerror = function (event) {
-    console.warn("Shared canvas websocket error", {url: wsUrl, event: event});
-  };
-  socket.onclose = function (event) {
-    if (!submitted) {
-      console.warn("Shared canvas websocket closed", {
-        code: event.code,
-        reason: event.reason,
-        wasClean: event.wasClean
-      });
-    }
-  };
-  socket.onmessage = function (event) {
-    if (event.data.indexOf(cfg.channel + ":") !== 0) return;
-    var msg;
-    try {
-      msg = JSON.parse(event.data.slice(cfg.channel.length + 1));
-    } catch (e) { return; }
-    if (msg.session_id && String(msg.session_id) !== String(cfg.session_id)) return;
-    // The current Dallinger relay broadcasts channel messages to subscribers;
-    // target filtering is for rendering only, not a privacy boundary.
-    var targetIds = Array.isArray(msg.target_participant_ids)
-      ? msg.target_participant_ids.map(String)
-      : null;
-    if (targetIds && targetIds.indexOf(String(cfg.participant_id)) === -1) return;
-    if (msg.target_participant_id &&
-        String(msg.target_participant_id) !== String(cfg.participant_id)) return;
-    if (!targetIds && !msg.target_participant_id &&
-        Number(msg.group_id) !== Number(cfg.group_id)) return;
-    if (msg.type === "state_snapshot") {
-      applySnapshot(msg);
-    } else if (msg.type === "ready_status") {
-      applyReadyStatus(msg);
-    } else if (msg.type === "game_started") {
-      applyGameStarted(msg);
-    } else if (msg.type === "position_update") {
+  var unsubscribeHandlers = [
+    psynet.session.onSnapshot(applySnapshot),
+    psynet.session.onEnd(submitFinalAnswer),
+    psynet.websocket.handle("position_update", function (msg) {
       applyPosition(msg.player);
-    } else if (msg.type === "coin_collected") {
+    }),
+    psynet.websocket.handle("coin_collected", function (msg) {
       applyCollection(msg);
-    } else if (msg.type === "collect_rejected") {
+    }),
+    psynet.websocket.handle("collect_rejected", function (msg) {
       handleCollectRejected(msg);
-    }
-  };
+    })
+  ];
+  psynet.session.init(liveSession);
+  psynet.session.ready();
 
   var drawInterval = setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);
   var sendInterval = setInterval(sendPosition, cfg.send_interval_ms);
@@ -849,13 +797,9 @@ document.addEventListener("DOMContentLoaded", function () {
     clearInterval(completionInterval);
     window.removeEventListener("keydown", handleArrowKeyDown, true);
     window.removeEventListener("keyup", handleArrowKeyUp, true);
-    if (closeSocket && socket) {
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onerror = null;
-      socket.onclose = null;
-      socket.close();
-    }
+    unsubscribeHandlers.forEach(function (unsubscribe) {
+      if (typeof unsubscribe === "function") unsubscribe();
+    });
   }
 
   window.addEventListener("beforeunload", function () { cleanup(true); });
