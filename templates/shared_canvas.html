@@ -76,7 +76,7 @@
 <div class="canvas-shell">
   <div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>
   <div class="canvas-stage">
-    <canvas id="shared-canvas" width="{{ params.live_session_config.canvas_width }}" height="{{ params.live_session_config.canvas_height }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
+    <canvas id="shared-canvas" width="{{ params.canvas_config.canvas_width }}" height="{{ params.canvas_config.canvas_height }}" tabindex="0" aria-label="Shared canvas arrow-key navigation area"></canvas>
     <div id="waiting-overlay" class="waiting-overlay">Waiting for other participants...</div>
   </div>
   <div class="zoom-control">
@@ -88,9 +88,9 @@
   <p class="canvas-legend">Brighter potential markers are more promising. Shaded zones show areas worth considering right now.</p>
 </div>
 <script>
-document.addEventListener("DOMContentLoaded", function () {
-  var liveSession = {{ params.live_session_config | tojson }};
-  var cfg = liveSession;
+psynet.trial.onEvent("liveSessionInit", function () {
+  var cfg = {{ params.canvas_config | tojson }};
+  var participantId = String(psynet.session.participant_id || cfg.participant_id);
   var canvas = document.getElementById("shared-canvas");
   var ctx = canvas.getContext("2d");
   var waitingOverlay = document.getElementById("waiting-overlay");
@@ -121,7 +121,7 @@ document.addEventListener("DOMContentLoaded", function () {
   var keys = {};
   var arrowKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
   var own = {
-    participant_id: String(cfg.participant_id),
+    participant_id: participantId,
     label: cfg.role,
     color: "#1f77b4",
     x: Number((cfg.initial_player || {}).x || cfg.canvas_size / 2),
@@ -144,7 +144,7 @@ document.addEventListener("DOMContentLoaded", function () {
       received_at: performance.now()
     });
   });
-  players[String(cfg.participant_id)] = Object.assign({}, own);
+  players[participantId] = Object.assign({}, own);
 
   function gameTime(now) {
     if (serverStartedAt == null) return 0;
@@ -175,11 +175,14 @@ document.addEventListener("DOMContentLoaded", function () {
   function applyServerStartTime(serverStartRaw, now, allowLargeJump) {
     if (!serverStartRaw) return;
     if (serverStartedAt != null && !allowLargeJump) return;
-    serverStartedAt = now;
-    gameStarted = true;
-    if (gameEndsAt == null) {
-      gameEndsAt = now + cfg.trial_seconds * 1000;
+    var serverStartMs = Date.parse(serverStartRaw);
+    if (Number.isFinite(serverStartMs)) {
+      serverStartedAt = now - Math.max(0, Date.now() - serverStartMs);
+    } else {
+      serverStartedAt = now;
     }
+    gameStarted = true;
+    gameEndsAt = serverStartedAt + cfg.trial_seconds * 1000;
     lastDrawAt = now;
     stormCursor = 0;
     activePotential = [];
@@ -289,10 +292,10 @@ document.addEventListener("DOMContentLoaded", function () {
       timing.server_start_time = state.server_start_time;
     }
     var bonuses = state.bonuses || {};
-    updateBonus(bonuses[String(cfg.participant_id)] || 0);
+    updateBonus(bonuses[participantId] || 0);
     collectedCoinIds = (state.collected_coins || [])
       .filter(function (collection) {
-        return String(collection.participant_id) === String(cfg.participant_id);
+        return String(collection.participant_id) === participantId;
       })
       .map(function (collection) {
         return String(collection.coin_id);
@@ -309,7 +312,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function applyPosition(player) {
     var participantId = String(player.participant_id);
-    if (participantId === String(cfg.participant_id)) return;
+    if (participantId === String(psynet.session.participant_id)) return;
     players[participantId] = Object.assign({}, players[participantId] || {}, player, {
       received_at: performance.now()
     });
@@ -321,13 +324,13 @@ document.addEventListener("DOMContentLoaded", function () {
     if (targetId) {
       delete pendingCollectionIds[targetId];
     }
-    if (String(collection.participant_id) === String(cfg.participant_id)) {
+    if (String(collection.participant_id) === participantId) {
       if (targetId && collectedCoinIds.indexOf(targetId) < 0) {
         collectedCoinIds.push(targetId);
       }
-      updateBonus((msg.bonuses || {})[String(cfg.participant_id)] || (bonus + cfg.coin_bonus));
+      updateBonus((msg.bonuses || {})[participantId] || (bonus + cfg.coin_bonus));
     } else if (msg.bonuses) {
-      updateBonus(msg.bonuses[String(cfg.participant_id)] || bonus);
+      updateBonus(msg.bonuses[participantId] || bonus);
     }
   }
 
@@ -364,7 +367,7 @@ document.addEventListener("DOMContentLoaded", function () {
     own.y = Math.max(cfg.player_radius, Math.min(cfg.canvas_size - cfg.player_radius, own.y + own.vy * dt));
     own.client_time = now;
     own.received_at = now;
-    players[String(cfg.participant_id)] = Object.assign({}, own);
+    players[participantId] = Object.assign({}, own);
     updateCameraForPlayer(own);
   }
 
@@ -662,7 +665,7 @@ document.addEventListener("DOMContentLoaded", function () {
     drawRewardEvents(t);
     Object.keys(players).forEach(function (participantId) {
       var player = renderedPlayer(players[participantId], now);
-      var isOwn = String(participantId) === String(cfg.participant_id);
+      var isOwn = String(participantId) === String(psynet.session.participant_id);
       var screen = worldToScreen(player.x, player.y);
       if (!isOnScreen(screen, cfg.player_radius + 6)) return;
       ctx.beginPath();
@@ -757,19 +760,23 @@ document.addEventListener("DOMContentLoaded", function () {
     sendPosition();
   }
 
-  canvas.addEventListener("click", focusCanvas);
+  function handleWindowBlur() {
+    keys = {};
+  }
+
+  psynet.addPageEventListener(canvas, "click", focusCanvas);
   if (zoomSlider) {
     viewportMiles = Number(zoomSlider.value || 200);
     updateZoomLabel();
-    zoomSlider.addEventListener("input", handleZoomChange);
+    psynet.addPageEventListener(zoomSlider, "input", handleZoomChange);
   }
-  window.addEventListener("keydown", handleArrowKeyDown, true);
-  window.addEventListener("keyup", handleArrowKeyUp, true);
-  window.addEventListener("blur", function () { keys = {}; });
+  psynet.addPageEventListener(window, "keydown", handleArrowKeyDown, true);
+  psynet.addPageEventListener(window, "keyup", handleArrowKeyUp, true);
+  psynet.addPageEventListener(window, "blur", handleWindowBlur);
   focusCanvas();
 
   var unsubscribeHandlers = [
-    psynet.session.onSnapshot(applySnapshot),
+    psynet.session.onFreshState(applySnapshot),
     psynet.session.onEnd(submitFinalAnswer),
     psynet.websocket.handle("position_update", function (msg) {
       applyPosition(msg.player);
@@ -781,7 +788,6 @@ document.addEventListener("DOMContentLoaded", function () {
       handleCollectRejected(msg);
     })
   ];
-  psynet.session.init(liveSession);
   psynet.session.ready();
 
   var drawInterval = setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);
@@ -791,18 +797,19 @@ document.addEventListener("DOMContentLoaded", function () {
     if (gameEndsAt != null && now >= gameEndsAt) submitFinalAnswer();
   }, 200);
 
-  function cleanup(closeSocket) {
+  var cleanedUp = false;
+  function cleanup() {
+    if (cleanedUp) return;
+    cleanedUp = true;
     clearInterval(drawInterval);
     clearInterval(sendInterval);
     clearInterval(completionInterval);
-    window.removeEventListener("keydown", handleArrowKeyDown, true);
-    window.removeEventListener("keyup", handleArrowKeyUp, true);
     unsubscribeHandlers.forEach(function (unsubscribe) {
       if (typeof unsubscribe === "function") unsubscribe();
     });
   }
 
-  window.addEventListener("beforeunload", function () { cleanup(true); });
+  psynet.addPageCleanupCallback(cleanup);
 });
 </script>
 {% endmacro %}

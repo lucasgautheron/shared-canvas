@@ -5,7 +5,7 @@ import os
 import random
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import List
+from typing import ClassVar, List
 
 from dallinger import db
 from dominate import tags
@@ -22,14 +22,20 @@ from sqlalchemy import (
 import psynet.experiment
 from psynet.bot import BotDriver, advance_past_wait_pages
 from psynet.data import SQLBase, SQLMixin, register_table
+from psynet.field import PythonDict, PythonList
 from psynet.modular_page import ModularPage
 from psynet.page import InfoPage, WaitPage
 from psynet.participant import Participant
-from psynet.session import LiveSession, LiveSessionControl
+from psynet.session import (
+    LiveSession,
+    LiveSessionControl,
+    LiveSessionInitializer,
+    session,
+)
 from psynet.sync import GroupBarrier, SimpleGrouper
 from psynet.timeline import PageMaker, Timeline, join
 from psynet.trial.static import StaticNode, StaticTrial, StaticTrialMaker
-from psynet.websocket import WebSocketMessage, websocket_handler
+from psynet.websocket import ClientWebSocketMessage, ServerWebSocketMessage
 
 from psynet.consent import NoConsent
 
@@ -130,11 +136,25 @@ class CanvasCollectEvent(SQLBase, SQLMixin):
 class CanvasGameState(LiveSession):
     """Authoritative live session for one canvas game."""
 
-    @classmethod
-    def build_initial_state(cls, participant_ids, group, trial):
-        """Return public resumable state for a synchronized canvas group."""
+    params = Column(PythonDict, default=lambda: {})
+    coins = Column(PythonList, default=lambda: [])
+    awarded_target_keys = Column(PythonList, default=lambda: [])
+    collected_coins = Column(PythonList, default=lambda: [])
+    bonuses = Column(PythonDict, default=lambda: {})
+    collection_counts = Column(PythonDict, default=lambda: {})
+    server_start_time = Column(String(64), nullable=True)
 
-        return cls.initial_state(participant_ids, trial.definition["world"])
+    def initialize(self, participant_ids, group):
+        """Initialize public resumable state for a synchronized canvas group."""
+
+        state = self.initial_state(participant_ids, self.node.definition["world"])
+        self.params = state["params"]
+        self.coins = state["coins"]
+        self.awarded_target_keys = state["awarded_target_keys"]
+        self.collected_coins = state["collected_coins"]
+        self.bonuses = state["bonuses"]
+        self.collection_counts = state["collection_counts"]
+        self.server_start_time = state["server_start_time"]
 
     @staticmethod
     def _spotter_spawn_points(world: dict, rng: random.Random) -> list[dict]:
@@ -234,12 +254,10 @@ class CanvasGameState(LiveSession):
         if not started_now:
             return False
 
-        state = deepcopy(self.state or {})
-        if not state.get("server_start_time"):
-            state["server_start_time"] = receive_time_iso(
-                receive_time or datetime.now(timezone.utc)
+        if not self.server_start_time:
+            self.server_start_time = receive_time_iso(
+                self.start_time or receive_time or datetime.now(timezone.utc)
             )
-        self.state = state
         return True
 
     def is_started(self) -> bool:
@@ -282,10 +300,10 @@ class CanvasGameState(LiveSession):
             "receive_time": collection["receive_time"],
         }
 
-    def _server_start_time(self, state: dict):
-        if not state.get("server_start_time"):
+    def _server_start_time(self):
+        if not self.server_start_time:
             return None
-        return self._parse_receive_time(state["server_start_time"])
+        return self._parse_receive_time(self.server_start_time)
 
     def record_collection(
         self,
@@ -299,7 +317,6 @@ class CanvasGameState(LiveSession):
         client_game_time_ms: float | None = None,
     ):
         """Apply a reward collection attempt to authoritative state."""
-        state = deepcopy(self.state or {})
         participant_id = str(participant_id)
         target = next(
             (c for c in reward_targets if c["id"] == coin_id),
@@ -308,7 +325,7 @@ class CanvasGameState(LiveSession):
         if target is None:
             return False, "unknown_hidden_coin", None
 
-        server_start = self._server_start_time(state)
+        server_start = self._server_start_time()
         if server_start is None:
             return False, "not_started", None
         receive_game_ms = int(
@@ -326,19 +343,22 @@ class CanvasGameState(LiveSession):
             or game_ms > int(target["end_ms"]) + COLLECTION_TIME_GRACE_MS
         ):
             return False, "not_available", None
-        if self._distance_to_target(target, x, y) > float(target.get("radius", COIN_RADIUS)):
+        if self._distance_to_target(target, x, y) > float(
+            target.get("radius", COIN_RADIUS)
+        ):
             return False, "too_far", None
 
         award_key = f"{participant_id}:{target['id']}"
-        awarded = set(state.setdefault("awarded_target_keys", []))
+        awarded = set(self.awarded_target_keys or [])
         if award_key in awarded:
             return False, "already_awarded", None
 
-        state.setdefault("collection_counts", {}).setdefault(participant_id, 0)
-        state["collection_counts"][participant_id] += 1
+        collection_counts = dict(self.collection_counts or {})
+        collection_counts.setdefault(participant_id, 0)
+        collection_counts[participant_id] += 1
         collected = {
             "coin_id": target["id"],
-            "public_coin_id": f"coin-{state['collection_counts'][participant_id]}",
+            "public_coin_id": f"coin-{collection_counts[participant_id]}",
             "participant_id": participant_id,
             "x": round(x, 3),
             "y": round(y, 3),
@@ -348,29 +368,30 @@ class CanvasGameState(LiveSession):
             "target_end_ms": target["end_ms"],
             "receive_time": receive_time_iso(receive_time),
         }
-        state.setdefault("collected_coins", []).append(collected)
-        state.setdefault("bonuses", {}).setdefault(participant_id, 0.0)
-        state["bonuses"][participant_id] = round(
-            float(state["bonuses"][participant_id]) + COIN_BONUS,
+        bonuses = dict(self.bonuses or {})
+        bonuses.setdefault(participant_id, 0.0)
+        bonuses[participant_id] = round(
+            float(bonuses[participant_id]) + COIN_BONUS,
             2,
         )
         awarded.add(award_key)
-        state["awarded_target_keys"] = sorted(awarded)
-        self.state = state
+        self.collection_counts = collection_counts
+        self.collected_coins = [*(self.collected_coins or []), collected]
+        self.bonuses = bonuses
+        self.awarded_target_keys = sorted(awarded)
         return True, None, collected
 
     def participant_result(self, participant_id: int) -> dict:
-        state = self.state or {}
-        world = state.get("params", {}).get("world", {})
+        world = (self.params or {}).get("world", {})
         participant_id_str = str(participant_id)
         collected_coins = [
             c
-            for c in state.get("collected_coins", [])
+            for c in self.collected_coins or []
             if str(c.get("participant_id")) == participant_id_str
         ]
         latest_position = (
             CanvasPositionEvent.query.filter_by(
-                session_id=self.session_id,
+                session_id=str(self.id),
                 participant_id=participant_id,
             )
             .order_by(CanvasPositionEvent.id.desc())
@@ -392,10 +413,10 @@ class CanvasGameState(LiveSession):
                 c.get("public_coin_id", c["coin_id"]) for c in collected_coins
             ],
             "coin_bonus": round(
-                float(state.get("bonuses", {}).get(participant_id_str, 0.0)), 2
+                float((self.bonuses or {}).get(participant_id_str, 0.0)), 2
             ),
             "collection_count": int(
-                state.get("collection_counts", {}).get(participant_id_str, 0)
+                (self.collection_counts or {}).get(participant_id_str, 0)
             ),
             "final_position": final_position,
             "world_id": world.get("world_id"),
@@ -403,10 +424,11 @@ class CanvasGameState(LiveSession):
         }
 
 
-class PositionMessage(WebSocketMessage):
+class PositionMessage(ClientWebSocketMessage):
     """High-frequency player position payload."""
 
-    session_id: str = Field(min_length=1)
+    event_type: ClassVar[str] = POSITION_EVENT
+    save: ClassVar[bool] = False
     x: float = Field(ge=0, le=CANVAS_SIZE)
     y: float = Field(ge=0, le=CANVAS_SIZE)
     vx: float
@@ -427,16 +449,119 @@ class PositionMessage(WebSocketMessage):
             "receive_time": receive_time_iso(receive_time),
         }
 
+    @session()
+    def handle(
+        self,
+        experiment,
+        participant,
+        session: CanvasGameState,
+        receive_time,
+    ):
+        """Persist and broadcast this high-frequency position update."""
 
-class CollectMessage(WebSocketMessage):
+        logged_event = CanvasPositionEvent(
+            session_id=str(session.id),
+            participant_id=participant.id,
+            x=self.x,
+            y=self.y,
+            vx=self.vx,
+            vy=self.vy,
+            client_time=self.client_time,
+            receive_time=receive_time,
+        )
+        db.session.add(logged_event)
+        db.session.flush()
+        PositionUpdateMessage(
+            event_id=logged_event.id,
+            player=self.player_payload(participant, receive_time),
+        ).send(session.participants)
+        db.session.commit()
+
+
+class CollectMessage(ClientWebSocketMessage):
     """Reward collection attempt payload."""
 
-    session_id: str = Field(min_length=1)
+    event_type: ClassVar[str] = COLLECT_EVENT
+    save: ClassVar[bool] = False
     coin_id: str = Field(min_length=1)
     x: float = Field(ge=0, le=CANVAS_SIZE)
     y: float = Field(ge=0, le=CANVAS_SIZE)
     client_time: float
     game_time_ms: float | None = Field(default=None, ge=0)
+
+    @session(mutate=True, logging=True)
+    def handle(
+        self,
+        experiment,
+        participant,
+        session: CanvasGameState,
+        receive_time,
+    ):
+        """Apply this reward collection attempt to authoritative state."""
+
+        reward_targets = session.node.definition["world"].get("reward_targets", [])
+        accepted, reason, collection = session.record_collection(
+            participant_id=participant.id,
+            coin_id=self.coin_id,
+            x=self.x,
+            y=self.y,
+            receive_time=receive_time,
+            reward_targets=reward_targets,
+            client_game_time_ms=self.game_time_ms,
+        )
+        db.session.add(
+            CanvasCollectEvent(
+                session_id=str(session.id),
+                participant_id=participant.id,
+                coin_id=self.coin_id,
+                x=self.x,
+                y=self.y,
+                client_time=self.client_time,
+                accepted=accepted,
+                rejection_reason=reason,
+                receive_time=receive_time,
+            )
+        )
+        if accepted:
+            CoinCollectedMessage(
+                collection=CanvasGameState.public_collection_payload(collection),
+                coins=session.coins or [],
+                bonuses=session.bonuses or {},
+            ).send(session.participants)
+            session.send_snapshot()
+        else:
+            CollectRejectedMessage(
+                coin_id=self.coin_id,
+                reason=reason or "unknown",
+            ).send(participant)
+
+
+class PositionUpdateMessage(ServerWebSocketMessage):
+    """Broadcast player position update."""
+
+    event_type: ClassVar[str] = "position_update"
+    save: ClassVar[bool] = False
+    event_id: int
+    player: dict
+
+
+class CoinCollectedMessage(ServerWebSocketMessage):
+    """Broadcast an accepted reward collection."""
+
+    event_type: ClassVar[str] = "coin_collected"
+    save: ClassVar[bool] = False
+    collection: dict
+    coins: list[dict]
+    bonuses: dict
+
+
+class CollectRejectedMessage(ServerWebSocketMessage):
+    """Notify a participant that a collection attempt was rejected."""
+
+    event_type: ClassVar[str] = "collect_rejected"
+    save: ClassVar[bool] = False
+    coin_id: str
+    reason: str
 
 
 def waiting_page(participant: Participant):
@@ -490,19 +615,28 @@ class SharedCanvasControl(LiveSessionControl):
     macro = "shared_canvas_control"
 
     def __init__(self, trial, participant):
+        self.trial = trial
         super().__init__(
             participant=participant,
+            session_class=CanvasGameState,
             group_type=GROUP_TYPE,
-            trial=trial,
+            session_initializer_id="shared_canvas_session",
             show_next_button=False,
         )
 
-    def build_control_params(self):
+    @property
+    def canvas_config(self):
         world = self.trial.definition["world"]
-        initial_players = CanvasGameState.initial_players(self.participant_ids, world)
-        role_index = self.participant_ids.index(self.participant_id)
+        participants = sorted(self._get_group().active_participants, key=lambda p: p.id)
+        participant_ids = [int(participant.id) for participant in participants]
+        if not participant_ids:
+            participant_ids = [int(self.participant.id)]
+        initial_players = CanvasGameState.initial_players(participant_ids, world)
+        participant_id = int(self.participant.id)
+        role_index = participant_ids.index(participant_id)
         return {
             "role": f"Player {role_index + 1}",
+            "participant_id": participant_id,
             "world_id": world["world_id"],
             "canvas_size": world["canvas_size"],
             "canvas_width": CANVAS_RENDER_WIDTH,
@@ -512,7 +646,7 @@ class SharedCanvasControl(LiveSessionControl):
             "draw_interval_ms": DRAW_INTERVAL_MS,
             "player_radius": PLAYER_RADIUS,
             "initial_players": initial_players,
-            "initial_player": initial_players[str(self.participant_id)],
+            "initial_player": initial_players[str(participant_id)],
             "coin_radius": world["coin_radius"],
             "coin_bonus": COIN_BONUS,
             "max_player_speed": world["max_player_speed"],
@@ -540,15 +674,16 @@ class SharedCanvasControl(LiveSessionControl):
 
 
 class SharedCanvasTrial(StaticTrial):
-    live_session_class = CanvasGameState
     time_estimate = TRIAL_SECONDS + 35
 
     def show_trial(self, experiment, participant):
         return join(
             instruction_page(),
-            GroupBarrier(
-                id_="canvas_start",
+            LiveSessionInitializer(
+                id_="shared_canvas_session",
                 group_type=GROUP_TYPE,
+                session_class=CanvasGameState,
+                waiting_logic=WaitPage(wait_time=0.5, save_answer=False),
                 max_wait_time=90,
             ),
             self.play_canvas(participant),
@@ -576,12 +711,14 @@ class SharedCanvasTrial(StaticTrial):
         )
 
     def score_canvas_game(self, participants: List[Participant]):
-        game_state = self.live_session
-        if game_state is None:
-            group = participants[0].active_sync_groups[GROUP_TYPE]
-            game_state = CanvasGameState.get(
-                CanvasGameState.build_session_id(group, self)
-            )
+        group = participants[0].active_sync_groups[GROUP_TYPE]
+        node_id, network_id = CanvasGameState._current_trial_details(group)
+        game_state = CanvasGameState.get_for_group(
+            group=group,
+            initializer_id="shared_canvas_session",
+            node_id=node_id,
+            network_id=network_id,
+        )
         if game_state is None:
             return
         for participant in participants:
@@ -662,7 +799,9 @@ class Exp(psynet.experiment.Experiment):
         StaticTrialMaker(
             id_="shared_canvas_worlds",
             trial_class=SharedCanvasTrial,
-            nodes=[WorldNode(definition={"world": world}) for world in WORLD_DEFINITIONS],
+            nodes=[
+                WorldNode(definition={"world": world}) for world in WORLD_DEFINITIONS
+            ],
             expected_trials_per_participant=1,
             max_trials_per_participant=1,
             sync_group_type=GROUP_TYPE,
@@ -672,97 +811,6 @@ class Exp(psynet.experiment.Experiment):
 
     test_n_bots = 4
     test_mode = "serial"
-
-    @websocket_handler(POSITION_EVENT, model=PositionMessage)
-    def position(self, participant, message: PositionMessage, receive_time):
-        """Persist and broadcast a high-frequency position update."""
-
-        live_session = CanvasGameState.get_current_for_participant(
-            participant, message.session_id
-        )
-        if live_session is None:
-            return
-
-        logged_event = CanvasPositionEvent(
-            session_id=live_session.session_id,
-            participant_id=participant.id,
-            x=message.x,
-            y=message.y,
-            vx=message.vx,
-            vy=message.vy,
-            client_time=message.client_time,
-            receive_time=receive_time,
-        )
-        db.session.add(logged_event)
-        db.session.flush()
-        self.websocket.send(
-            live_session.participant_ids,
-            "position_update",
-            {
-                "event_id": logged_event.id,
-                "player": message.player_payload(participant, receive_time),
-            },
-        )
-        db.session.commit()
-
-    @websocket_handler(COLLECT_EVENT, model=CollectMessage)
-    def collect(self, participant, message: CollectMessage, receive_time):
-        """Apply a reward collection attempt to authoritative state."""
-
-        live_session = CanvasGameState.get_current_for_participant(
-            participant, message.session_id, for_update=True
-        )
-        if live_session is None:
-            return
-
-        trial = live_session.get_participant_trial(participant)
-        if trial is None:
-            return
-        reward_targets = trial.definition["world"].get("reward_targets", [])
-        accepted, reason, collection = live_session.record_collection(
-            participant_id=participant.id,
-            coin_id=message.coin_id,
-            x=message.x,
-            y=message.y,
-            receive_time=receive_time,
-            reward_targets=reward_targets,
-            client_game_time_ms=message.game_time_ms,
-        )
-        db.session.add(
-            CanvasCollectEvent(
-                session_id=live_session.session_id,
-                participant_id=participant.id,
-                coin_id=message.coin_id,
-                x=message.x,
-                y=message.y,
-                client_time=message.client_time,
-                accepted=accepted,
-                rejection_reason=reason,
-                receive_time=receive_time,
-            )
-        )
-        if accepted:
-            state = live_session.state or {}
-            self.websocket.send(
-                live_session.participant_ids,
-                "coin_collected",
-                {
-                    "collection": CanvasGameState.public_collection_payload(collection),
-                    "coins": state.get("coins", []),
-                    "bonuses": state.get("bonuses", {}),
-                },
-            )
-            live_session.send_snapshot(self)
-        else:
-            self.websocket.send(
-                participant,
-                "collect_rejected",
-                {
-                    "coin_id": message.coin_id,
-                    "reason": reason,
-                },
-            )
-        db.session.commit()
 
     def test_serial_run_bots(self, bots: List[BotDriver]):
         advance_past_wait_pages(bots)
@@ -795,4 +843,7 @@ class Exp(psynet.experiment.Experiment):
             answers_by_group.setdefault(group_id, []).append(answer)
 
         assert len(answers_by_group) == len(bots) // GROUP_SIZE
-        assert all(len(group_answers) == GROUP_SIZE for group_answers in answers_by_group.values())
+        assert all(
+            len(group_answers) == GROUP_SIZE
+            for group_answers in answers_by_group.values()
+        )
