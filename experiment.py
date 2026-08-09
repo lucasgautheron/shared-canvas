@@ -7,21 +7,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import ClassVar, List
 
-from dallinger import db
 from dominate import tags
 from pydantic import Field
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    Float,
-    Integer,
-    String,
-)
+from sqlalchemy import Column, String
 
 import psynet.experiment
 from psynet.bot import BotDriver, advance_past_wait_pages
-from psynet.data import SQLBase, SQLMixin, register_table
 from psynet.field import PythonDict, PythonList
 from psynet.modular_page import ModularPage
 from psynet.page import InfoPage, WaitPage
@@ -94,43 +85,6 @@ WORLD_DEFINITIONS = load_world_definitions(
 
 def receive_time_iso(receive_time: datetime):
     return receive_time.isoformat()
-
-
-@register_table
-class CanvasPositionEvent(SQLBase, SQLMixin):
-    """Persisted high-frequency position event.
-
-    Position events are recorded for analysis and replay, but they do not mutate
-    the authoritative ``CanvasGameState``.
-    """
-
-    __tablename__ = "canvas_position_event"
-
-    session_id = Column(String(128), index=True)
-    participant_id = Column(Integer, index=True, nullable=True)
-    x = Column(Float)
-    y = Column(Float)
-    vx = Column(Float)
-    vy = Column(Float)
-    client_time = Column(Float)
-    receive_time = Column(DateTime(timezone=True), nullable=False)
-
-
-@register_table
-class CanvasCollectEvent(SQLBase, SQLMixin):
-    """Persisted coin/reward collection event."""
-
-    __tablename__ = "canvas_collect_event"
-
-    session_id = Column(String(128), index=True)
-    participant_id = Column(Integer, index=True, nullable=True)
-    coin_id = Column(String(128), index=True)
-    x = Column(Float)
-    y = Column(Float)
-    client_time = Column(Float)
-    accepted = Column(Boolean, nullable=True, index=True)
-    rejection_reason = Column(String(128), nullable=True)
-    receive_time = Column(DateTime(timezone=True), nullable=False)
 
 
 class CanvasGameState(LiveSession):
@@ -381,7 +335,7 @@ class CanvasGameState(LiveSession):
         self.awarded_target_keys = sorted(awarded)
         return True, None, collected
 
-    def participant_result(self, participant_id: int) -> dict:
+    def participant_result(self, participant_id: int, raw_answer=None) -> dict:
         world = (self.params or {}).get("world", {})
         participant_id_str = str(participant_id)
         collected_coins = [
@@ -389,22 +343,9 @@ class CanvasGameState(LiveSession):
             for c in self.collected_coins or []
             if str(c.get("participant_id")) == participant_id_str
         ]
-        latest_position = (
-            CanvasPositionEvent.query.filter_by(
-                session_id=str(self.id),
-                participant_id=participant_id,
-            )
-            .order_by(CanvasPositionEvent.id.desc())
-            .first()
-        )
         final_position = None
-        if latest_position is not None:
-            final_position = {
-                "x": latest_position.x,
-                "y": latest_position.y,
-                "vx": latest_position.vx,
-                "vy": latest_position.vy,
-            }
+        if isinstance(raw_answer, dict):
+            final_position = raw_answer.get("client_final_position")
         return {
             "completed_live_canvas": True,
             "participant_id": participant_id,
@@ -457,25 +398,11 @@ class PositionMessage(ClientWebSocketMessage):
         session: CanvasGameState,
         receive_time,
     ):
-        """Persist and broadcast this high-frequency position update."""
+        """Broadcast this high-frequency position update."""
 
-        logged_event = CanvasPositionEvent(
-            session_id=str(session.id),
-            participant_id=participant.id,
-            x=self.x,
-            y=self.y,
-            vx=self.vx,
-            vy=self.vy,
-            client_time=self.client_time,
-            receive_time=receive_time,
-        )
-        db.session.add(logged_event)
-        db.session.flush()
         PositionUpdateMessage(
-            event_id=logged_event.id,
             player=self.player_payload(participant, receive_time),
         ).send(session.participants)
-        db.session.commit()
 
 
 class CollectMessage(ClientWebSocketMessage):
@@ -509,19 +436,6 @@ class CollectMessage(ClientWebSocketMessage):
             reward_targets=reward_targets,
             client_game_time_ms=self.game_time_ms,
         )
-        db.session.add(
-            CanvasCollectEvent(
-                session_id=str(session.id),
-                participant_id=participant.id,
-                coin_id=self.coin_id,
-                x=self.x,
-                y=self.y,
-                client_time=self.client_time,
-                accepted=accepted,
-                rejection_reason=reason,
-                receive_time=receive_time,
-            )
-        )
         if accepted:
             CoinCollectedMessage(
                 collection=CanvasGameState.public_collection_payload(collection),
@@ -541,7 +455,6 @@ class PositionUpdateMessage(ServerWebSocketMessage):
 
     event_type: ClassVar[str] = "position_update"
     save: ClassVar[bool] = False
-    event_id: int
     player: dict
 
 
@@ -722,8 +635,13 @@ class SharedCanvasTrial(StaticTrial):
         if game_state is None:
             return
         for participant in participants:
+            try:
+                raw_answer = participant.var.shared_canvas_browser_answer
+            except AttributeError:
+                raw_answer = None
             participant.var.shared_canvas_result = game_state.participant_result(
-                participant.id
+                participant.id,
+                raw_answer=raw_answer,
             )
 
     def format_answer(self, raw_answer, **kwargs):
