@@ -31,3 +31,6 @@ __pycache__
 develop/
 deploy/
 deploy_logs/
+
+.playwright-browsers/
+static/visualizations

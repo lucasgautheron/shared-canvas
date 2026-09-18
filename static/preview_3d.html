@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Storm-chase 3D preview</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1.5rem; background: #f4f7fb; }
+    .canvas-stage { position: relative; width: min(960px, 96vw); }
+    #shared-canvas { width: 100%; height: auto; border-radius: 14px; background: #87a7c3; }
+    #overview-map {
+      position: absolute; top: 12px; right: 12px;
+      border: 2px solid #22334d; border-radius: 12px; background: #f8fbff;
+      pointer-events: none;
+    }
+    .waiting-overlay { display: none; }
+  </style>
+</head>
+<body>
+  <p>Coin bonus: $<span id="coin-bonus">0.00</span></p>
+  <div class="canvas-stage">
+    <canvas id="shared-canvas" width="960" height="540" tabindex="0"></canvas>
+    <canvas id="overview-map" width="540" height="540"></canvas>
+    <div id="waiting-overlay" class="waiting-overlay"></div>
+  </div>
+  <p>Map width: <span id="zoom-label">200</span> miles</p>
+  <input id="zoom-slider" type="range" min="50" max="400" step="10" value="200">
+  <script>
+    window.psynet = {
+      session: {
+        participant_id: "1",
+        ready: function () {},
+        onFreshState: function (callback) {
+          setTimeout(function () {
+            callback({
+              started: true,
+              ready_participant_ids: ["1", "2"],
+              state: { server_start_time: new Date().toISOString(), bonuses: { "1": 0 } },
+            });
+          }, 250);
+          return function () {};
+        },
+        onEnd: function () { return function () {}; },
+      },
+      websocket: {
+        send: function () {},
+        handle: function () { return function () {}; },
+      },
+      addPageEventListener: function (target, eventName, handler, capture) {
+        target.addEventListener(eventName, handler, capture);
+      },
+      addPageCleanupCallback: function () {},
+      nextPage: function () {},
+    };
+  </script>
+  <script src="/static/js/three.min.js"></script>
+  <script src="/static/js/shared_canvas_3d.js"></script>
+  <script>
+    SharedCanvas3D.start({
+      role: "Player 1",
+      participant_id: 1,
+      world_id: "preview",
+      canvas_size: 640,
+      canvas_width: 960,
+      canvas_height: 540,
+      trial_seconds: 90,
+      send_interval_ms: 100,
+      player_radius: 12,
+      coin_radius: 18,
+      coin_bonus: 0.1,
+      max_player_speed: 80,
+      projection: { px_per_mile: 1 },
+      initial_player: { x: 180, y: 220, vx: 0, vy: 0, color: "#1f77b4" },
+      initial_players: {
+        "1": { participant_id: "1", x: 180, y: 220, vx: 0, vy: 0, color: "#1f77b4" },
+        "2": { participant_id: "2", x: 260, y: 250, vx: 12, vy: -4, color: "#d62728" },
+      },
+      storm_points: [
+        [0, 90000, 240, 210, 35, 50, 0],
+        [0, 90000, 300, 190, 55, 60, 0],
+        [0, 90000, 210, 280, 20, 30, 0],
+        [0, 90000, 170, 170, 12, 20, 0],
+        [0, 90000, 330, 250, 70, 70, 0],
+        [0, 90000, 260, 300, 40, 45, 0],
+        [0, 90000, 145, 240, 8, 15, 0],
+      ],
+      chaser_tracks: [{
+        id: "ghost-1",
+        points: [
+          [0, 120, 160, 0, 0.4],
+          [10000, 200, 200, 10000, 0.6],
+          [20000, 280, 230, 20000, 0.2],
+        ],
+      }, {
+        id: "ghost-2",
+        points: [
+          [0, 340, 140, 0, 2.2],
+          [12000, 300, 180, 12000, 2.4],
+          [24000, 250, 210, 24000, 2.6],
+        ],
+      }],
+      chaser_track_visible_ms: 600000,
+      warnings: [{
+        id: "w1",
+        event: "Tornado Warning",
+        eff_ms: 0,
+        exp_ms: 90000,
+        polygons: [[[150, 150], [320, 160], [300, 280], [140, 250]]],
+      }],
+      reward_events: [{
+        id: "coin-1",
+        start_ms: 0,
+        end_ms: 90000,
+        x: 300,
+        y: 200,
+        radius: 22,
+        line: [[280, 190], [320, 210]],
+      }],
+      timing: { game_start_ms: 0, game_end_ms: 90000 },
+    });
+  </script>
+</body>
+</html>

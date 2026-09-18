@@ -7,14 +7,18 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import ClassVar, List
 
+from dallinger.experiment import experiment_route
+from dallinger.experiment_server.utils import success_response
 from dominate import tags
+from flask import request
 from pydantic import Field
 from sqlalchemy import Column, String
 
 import psynet.experiment
 from psynet.bot import BotDriver, advance_past_wait_pages
+from psynet.db import with_transaction
 from psynet.field import PythonDict, PythonList
-from psynet.modular_page import ModularPage
+from psynet.modular_page import Control, ModularPage
 from psynet.page import InfoPage, WaitPage
 from psynet.participant import Participant
 from psynet.session import (
@@ -23,7 +27,7 @@ from psynet.session import (
     LiveSessionInitializer,
     session,
 )
-from psynet.sync import GroupBarrier, SimpleGrouper
+from psynet.sync import Barrier, GroupBarrier, SimpleGrouper
 from psynet.timeline import PageMaker, Timeline, join
 from psynet.trial.static import StaticNode, StaticTrial, StaticTrialMaker
 from psynet.websocket import ClientWebSocketMessage, ServerWebSocketMessage
@@ -43,6 +47,7 @@ else:
 
 
 GROUP_TYPE = "shared_canvas_group"
+GROUPER_ID = f"{GROUP_TYPE}_grouper"
 GROUP_SIZE = 2
 CANVAS_SIZE = 640
 CANVAS_RENDER_WIDTH = 960
@@ -57,6 +62,9 @@ STORM_CHASER_TRACK_COUNT = 8
 CHASER_TRACK_VISIBLE_MS = 30 * 60 * 1000
 POSITION_EVENT = "position"
 COLLECT_EVENT = "collect"
+LOBBY_POSITION_EVENT = "lobby_position"
+LOBBY_PAGE_LABEL = "canvas_lobby"
+LOBBY_MAX_PLAYER_SPEED = 80
 STATIC_SESSION_ROOT = os.path.join(os.path.dirname(__file__), "static")
 COLLECTION_TIME_GRACE_MS = 750
 
@@ -85,6 +93,21 @@ WORLD_DEFINITIONS = load_world_definitions(
 
 def receive_time_iso(receive_time: datetime):
     return receive_time.isoformat()
+
+
+def lobby_spawn_for_participant(participant_id: int) -> dict:
+    rng = random.Random(int(participant_id) * 7919)
+    margin = 80
+    return {
+        "participant_id": str(participant_id),
+        "label": f"Player {participant_id}",
+        "color": PLAYER_COLORS[int(participant_id) % len(PLAYER_COLORS)],
+        "x": round(rng.uniform(margin, CANVAS_SIZE - margin), 2),
+        "y": round(rng.uniform(margin, CANVAS_SIZE - margin), 2),
+        "vx": 0.0,
+        "vy": 0.0,
+        "heading": 0.0,
+    }
 
 
 class CanvasGameState(LiveSession):
@@ -369,7 +392,7 @@ class PositionMessage(ClientWebSocketMessage):
     """High-frequency player position payload."""
 
     event_type: ClassVar[str] = POSITION_EVENT
-    save: ClassVar[bool] = False
+    save: ClassVar[bool] = True
     x: float = Field(ge=0, le=CANVAS_SIZE)
     y: float = Field(ge=0, le=CANVAS_SIZE)
     vx: float
@@ -409,7 +432,7 @@ class CollectMessage(ClientWebSocketMessage):
     """Reward collection attempt payload."""
 
     event_type: ClassVar[str] = COLLECT_EVENT
-    save: ClassVar[bool] = False
+    save: ClassVar[bool] = True
     coin_id: str = Field(min_length=1)
     x: float = Field(ge=0, le=CANVAS_SIZE)
     y: float = Field(ge=0, le=CANVAS_SIZE)
@@ -462,7 +485,7 @@ class CoinCollectedMessage(ServerWebSocketMessage):
     """Broadcast an accepted reward collection."""
 
     event_type: ClassVar[str] = "coin_collected"
-    save: ClassVar[bool] = False
+    save: ClassVar[bool] = True
     collection: dict
     coins: list[dict]
     bonuses: dict
@@ -477,17 +500,81 @@ class CollectRejectedMessage(ServerWebSocketMessage):
     reason: str
 
 
-def waiting_page(participant: Participant):
-    active_barrier = participant.active_barriers.get("canvas_grouper", None)
-    if active_barrier:
-        waiting = active_barrier.get_waiting_participants()
-        content = (
-            "Waiting for the shared canvas group. "
-            f"{len(waiting)} participant(s) are currently ready."
-        )
-    else:
-        content = "Preparing the shared canvas."
-    return WaitPage(content=content, wait_time=2.5)
+class LobbyPositionMessage(ClientWebSocketMessage):
+    """Unsaved waiter pose for the pre-group 3D lobby."""
+
+    event_type: ClassVar[str] = LOBBY_POSITION_EVENT
+    save: ClassVar[bool] = False
+    x: float = Field(ge=0, le=CANVAS_SIZE)
+    y: float = Field(ge=0, le=CANVAS_SIZE)
+    vx: float
+    vy: float
+    client_time: float
+    low_latency: bool = True
+
+    def player_payload(self, participant: Participant, receive_time):
+        spawn = lobby_spawn_for_participant(int(participant.id))
+        return {
+            "participant_id": str(participant.id),
+            "label": spawn["label"],
+            "color": spawn["color"],
+            "x": round(clamp(self.x, 0, CANVAS_SIZE), 3),
+            "y": round(clamp(self.y, 0, CANVAS_SIZE), 3),
+            "vx": round(self.vx, 3),
+            "vy": round(self.vy, 3),
+            "client_time": self.client_time,
+            "receive_time": receive_time_iso(receive_time),
+        }
+
+    def handle(self, experiment, participant, receive_time):
+        """Broadcast this pose to whoever is currently waiting at the grouper."""
+
+        waiters = Barrier.get_waiting_participants_from_barrier_id(GROUPER_ID)
+        waiter_ids = [str(waiter.id) for waiter in waiters]
+        if str(participant.id) not in waiter_ids:
+            return None
+        LobbyPositionUpdateMessage(
+            player=self.player_payload(participant, receive_time),
+            waiter_ids=waiter_ids,
+        ).send(waiters)
+        return None
+
+
+class LobbyPositionUpdateMessage(ServerWebSocketMessage):
+    """Broadcast a lobby pose to current SimpleGrouper waiters."""
+
+    event_type: ClassVar[str] = "lobby_position_update"
+    save: ClassVar[bool] = False
+    player: dict
+    waiter_ids: list[str]
+
+
+def lobby_page(participant: Participant):
+    return ModularPage(
+        LOBBY_PAGE_LABEL,
+        "",
+        LobbyControl(participant),
+        save_answer=False,
+        time_estimate=5,
+        session_id="canvas_lobby",
+        show_next_button=False,
+    )
+
+
+def advance_past_lobby_pages(bots: List[BotDriver], max_iterations=20):
+    iteration = 0
+    while True:
+        iteration += 1
+        any_waiting = False
+        for bot in bots:
+            current_page = bot.get_current_page()
+            if getattr(current_page, "label", None) == LOBBY_PAGE_LABEL:
+                any_waiting = True
+                bot.take_page()
+        if not any_waiting:
+            break
+        if iteration >= max_iterations:
+            raise RuntimeError("Not all bots finished lobby waiting in time.")
 
 
 def instruction_page():
@@ -495,20 +582,18 @@ def instruction_page():
     with content:
         tags.h2("Shared canvas navigation")
         tags.p(
-            "You will enter a square canvas with other live participants. "
-            "Use the arrow keys to move your avatar."
+            "You will drive a car across a live storm map with other "
+            "participants. Use the arrow keys or WASD to accelerate, brake, "
+            "and steer."
         )
         tags.p(
-            "Your movement has a little inertia: when you release a key, your "
-            "avatar slows down smoothly instead of stopping immediately."
+            "A map in the upper right shows the wider area around your car. "
+            "Use it to spot storm columns, warning zones, and other drivers."
         )
         tags.p(
-            "Coins appear in places that are worth exploring. Colored potential "
-            "markers and shaded zones can help you decide where to go."
-        )
-        tags.p(
-            "Move through promising areas at the right time. Each coin you find "
-            "adds $0.10 to your bonus."
+            "Coins appear in places that are worth exploring. Drive through "
+            "promising areas at the right time. Each coin you find adds $0.10 "
+            "to your bonus."
         )
     return InfoPage(content, time_estimate=20)
 
@@ -519,6 +604,39 @@ def build_bot_answer(bot) -> dict:
         "bot_participant_id": bot.id,
         "note": "PsyNet bot path bypasses browser websocket canvas interaction.",
     }
+
+
+class LobbyControl(Control):
+    """Pre-group 3D wait room with no LiveSession or saved answers."""
+
+    external_template = "shared_canvas.html"
+    macro = "shared_canvas_control"
+
+    def __init__(self, participant):
+        self.participant = participant
+        super().__init__(show_next_button=False)
+
+    @property
+    def canvas_config(self):
+        participant_id = int(self.participant.id)
+        initial_player = lobby_spawn_for_participant(participant_id)
+        return {
+            "mode": "lobby",
+            "role": initial_player["label"],
+            "participant_id": participant_id,
+            "canvas_size": CANVAS_SIZE,
+            "canvas_width": CANVAS_RENDER_WIDTH,
+            "canvas_height": CANVAS_RENDER_HEIGHT,
+            "send_interval_ms": SEND_INTERVAL_MS,
+            "player_radius": PLAYER_RADIUS,
+            "initial_players": {str(participant_id): initial_player},
+            "initial_player": initial_player,
+            "max_player_speed": LOBBY_MAX_PLAYER_SPEED,
+            "trial_seconds": 180,
+        }
+
+    def get_bot_response(self, experiment, bot, page, prompt):
+        return None
 
 
 class SharedCanvasControl(LiveSessionControl):
@@ -612,8 +730,8 @@ class SharedCanvasTrial(StaticTrial):
         prompt = tags.div()
         with prompt:
             tags.p(
-                "Use the arrow keys to move. Watch the changing potential "
-                "markers and shaded zones to find coins before the session ends."
+                "Drive with the arrow keys or WASD. Use the upper-right map "
+                "to find coins before the session ends."
             )
         return ModularPage(
             "shared_canvas",
@@ -678,7 +796,7 @@ class SharedCanvasTrial(StaticTrial):
         with content:
             tags.h2("Navigation complete")
             tags.p(f"Your coin bonus is ${bonus:.2f}.")
-            tags.p("Thank you for exploring the shared canvas.")
+            tags.p("Thank you for exploring the shared map.")
         return InfoPage(content, time_estimate=5)
 
 
@@ -711,7 +829,8 @@ class Exp(psynet.experiment.Experiment):
             group_type=GROUP_TYPE,
             initial_group_size=GROUP_SIZE,
             batch_size=GROUP_SIZE,
-            waiting_logic=PageMaker(waiting_page, time_estimate=5),
+            waiting_logic=PageMaker(lobby_page, time_estimate=5),
+            waiting_logic_expected_repetitions=1,
             max_wait_time=180,
         ),
         StaticTrialMaker(
@@ -730,7 +849,25 @@ class Exp(psynet.experiment.Experiment):
     test_n_bots = 4
     test_mode = "serial"
 
+    @experiment_route("/lobby/waiting", methods=["GET"])
+    @classmethod
+    @with_transaction
+    def lobby_waiting(cls):
+        unique_id = request.args.get("unique_id")
+        if not unique_id:
+            return success_response(waiting=True, waiter_count=0)
+        try:
+            participant = cls.get_participant_from_unique_id(
+                unique_id, for_update=False
+            )
+        except Exception:
+            return success_response(waiting=True, waiter_count=0)
+        waiting = GROUPER_ID in participant.active_barriers
+        waiters = Barrier.get_waiting_participants_from_barrier_id(GROUPER_ID)
+        return success_response(waiting=waiting, waiter_count=len(waiters))
+
     def test_serial_run_bots(self, bots: List[BotDriver]):
+        advance_past_lobby_pages(bots)
         advance_past_wait_pages(bots)
 
         for bot in bots:
