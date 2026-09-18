@@ -1,0 +1,102 @@
+.canvas-shell {
+  max-width: 1040px;
+  margin: 0 auto;
+  font-family: system-ui, sans-serif;
+  text-align: center;
+}
+.bonus-pill {
+  display: inline-block;
+  margin: 0.4rem 0 0.8rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  background: #fff7d6;
+  border: 1px solid #f0d76b;
+  color: #594300;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+#shared-canvas {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  display: block;
+  border: 2px solid #22334d;
+  border-radius: 14px;
+  background: #87a7c3;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+}
+.canvas-stage {
+  position: relative;
+  display: inline-block;
+  width: min(1000px, 96vw);
+}
+#overview-map {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 54%;
+  height: auto;
+  aspect-ratio: 1;
+  display: block;
+  border: 2px solid #22334d;
+  border-radius: 12px;
+  background: #f8fbff;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+}
+.overview-label {
+  position: absolute;
+  top: 18px;
+  right: 20px;
+  z-index: 2;
+  color: #22334d;
+  font-size: 0.75rem;
+  font-weight: 700;
+  pointer-events: none;
+}
+.waiting-overlay {
+  position: absolute;
+  inset: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(248, 251, 255, 0.92);
+  color: #22334d;
+  font-size: 1.2rem;
+  font-weight: 700;
+  pointer-events: none;
+}
+.waiting-overlay.lobby-overlay {
+  background: rgba(248, 251, 255, 0.38);
+  font-size: 2rem;
+  text-shadow: 0 1px 10px rgba(255, 255, 255, 0.9);
+}
+.waiting-overlay.hidden {
+  display: none;
+}
+#shared-canvas:focus {
+  outline: 3px solid #4f8cff;
+  outline-offset: 4px;
+}
+.canvas-help {
+  margin: 0.75rem auto 0;
+  max-width: 620px;
+  color: #52606d;
+}
+.canvas-legend {
+  margin: 0.35rem auto 0;
+  max-width: 620px;
+  color: #52606d;
+  font-size: 0.9rem;
+}
+.zoom-control {
+  margin: 0.55rem auto 0;
+  max-width: 620px;
+  color: #52606d;
+  font-size: 0.9rem;
+}
+.zoom-control input {
+  width: min(420px, 80vw);
+  vertical-align: middle;
+}

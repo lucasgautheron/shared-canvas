@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import os
 import random
-from copy import deepcopy
 from datetime import datetime, timezone
 from typing import ClassVar, List
 
@@ -15,6 +14,7 @@ from pydantic import Field
 from sqlalchemy import Column, String
 
 import psynet.experiment
+from psynet.asset import asset
 from psynet.bot import BotDriver, advance_past_wait_pages
 from psynet.db import with_transaction
 from psynet.field import PythonDict, PythonList
@@ -37,12 +37,16 @@ from psynet.consent import NoConsent
 if __package__:
     from .session_worlds import (
         load_world_definitions,
+        node_definition_from_world,
         public_world_payload,
+        write_world_json,
     )
 else:
     from session_worlds import (
         load_world_definitions,
+        node_definition_from_world,
         public_world_payload,
+        write_world_json,
     )
 
 
@@ -82,17 +86,34 @@ def clamp(value, low, high):
     return max(low, min(high, value))
 
 
-WORLD_DEFINITIONS = load_world_definitions(
-    static_root=STATIC_SESSION_ROOT,
-    canvas_size=CANVAS_SIZE,
-    trial_seconds=TRIAL_SECONDS,
-    coin_radius=COIN_RADIUS,
-    coin_bonus=COIN_BONUS,
-)
+def get_world_nodes():
+    worlds = load_world_definitions(
+        static_root=STATIC_SESSION_ROOT,
+        canvas_size=CANVAS_SIZE,
+        trial_seconds=TRIAL_SECONDS,
+        coin_radius=COIN_RADIUS,
+        coin_bonus=COIN_BONUS,
+        include_browser_layers=False,
+    )
+    return [
+        StaticNode(
+            definition=node_definition_from_world(world),
+            assets={
+                "world": asset(write_world_json, cache=True, extension=".json"),
+            },
+        )
+        for world in worlds
+    ]
+
+
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return value.astimezone(timezone.utc)
 
 
 def receive_time_iso(receive_time: datetime):
-    return receive_time.isoformat()
+    return as_utc(receive_time).isoformat()
 
 
 def lobby_spawn_for_participant(participant_id: int) -> dict:
@@ -119,18 +140,22 @@ class CanvasGameState(LiveSession):
     collected_coins = Column(PythonList, default=lambda: [])
     bonuses = Column(PythonDict, default=lambda: {})
     collection_counts = Column(PythonDict, default=lambda: {})
+    reward_targets = Column(PythonList, default=lambda: [])
     server_start_time = Column(String(64), nullable=True)
 
     def initialize(self, participant_ids, group):
         """Initialize public resumable state for a synchronized canvas group."""
 
-        state = self.initial_state(participant_ids, self.node.definition["world"])
+        definition = self.node.definition
+        state = self.initial_state(participant_ids, definition)
         self.params = state["params"]
         self.coins = state["coins"]
         self.awarded_target_keys = state["awarded_target_keys"]
         self.collected_coins = state["collected_coins"]
         self.bonuses = state["bonuses"]
         self.collection_counts = state["collection_counts"]
+        # Copied once at trial start so collect never reads node.definition or assets.
+        self.reward_targets = list(definition.get("reward_targets") or [])
         self.server_start_time = state["server_start_time"]
 
     @staticmethod
@@ -222,9 +247,7 @@ class CanvasGameState(LiveSession):
             parsed = value
         else:
             parsed = datetime.fromisoformat(str(value))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+        return as_utc(parsed)
 
     def mark_ready(self, participant, receive_time=None) -> bool:
         started_now = super().mark_ready(participant)
@@ -233,7 +256,7 @@ class CanvasGameState(LiveSession):
 
         if not self.server_start_time:
             self.server_start_time = receive_time_iso(
-                self.start_time or receive_time or datetime.now(timezone.utc)
+                receive_time or datetime.now(timezone.utc)
             )
         return True
 
@@ -290,11 +313,11 @@ class CanvasGameState(LiveSession):
         x: float,
         y: float,
         receive_time,
-        reward_targets: list[dict],
         client_game_time_ms: float | None = None,
     ):
         """Apply a reward collection attempt to authoritative state."""
         participant_id = str(participant_id)
+        reward_targets = self.reward_targets or []
         target = next(
             (c for c in reward_targets if c["id"] == coin_id),
             None,
@@ -399,7 +422,6 @@ class PositionMessage(ClientWebSocketMessage):
     vy: float
     client_time: float
     game_time_ms: float = Field(default=0.0, ge=0)
-    low_latency: bool = True
 
     def player_payload(self, participant: Participant, receive_time):
         participant_id = str(participant.id)
@@ -447,16 +469,17 @@ class CollectMessage(ClientWebSocketMessage):
         session: CanvasGameState,
         receive_time,
     ):
-        """Apply this reward collection attempt to authoritative state."""
+        """Apply this reward collection attempt to authoritative state.
 
-        reward_targets = session.node.definition["world"].get("reward_targets", [])
+        Uses session.reward_targets only; live handlers must not load world assets.
+        """
+
         accepted, reason, collection = session.record_collection(
             participant_id=participant.id,
             coin_id=self.coin_id,
             x=self.x,
             y=self.y,
             receive_time=receive_time,
-            reward_targets=reward_targets,
             client_game_time_ms=self.game_time_ms,
         )
         if accepted:
@@ -510,7 +533,6 @@ class LobbyPositionMessage(ClientWebSocketMessage):
     vx: float
     vy: float
     client_time: float
-    low_latency: bool = True
 
     def player_payload(self, participant: Participant, receive_time):
         spawn = lobby_spawn_for_participant(int(participant.id))
@@ -606,7 +628,23 @@ def build_bot_answer(bot) -> dict:
     }
 
 
-class LobbyControl(Control):
+class SharedCanvasAssets:
+    """PsyNet 14 page assets for the shared canvas lobby and game controls."""
+
+    def get_css_links(self):
+        return ["/static/css/shared_canvas.css"]
+
+    def get_js_dependencies(self):
+        return ["/static/js/three.min.js", "/static/js/shared_canvas_3d.js"]
+
+    def get_js_page_modules(self):
+        return ["/static/js/shared_canvas_page.js"]
+
+    def get_js_vars(self):
+        return {"canvas_config": self.canvas_config}
+
+
+class LobbyControl(SharedCanvasAssets, Control):
     """Pre-group 3D wait room with no LiveSession or saved answers."""
 
     external_template = "shared_canvas.html"
@@ -639,7 +677,7 @@ class LobbyControl(Control):
         return None
 
 
-class SharedCanvasControl(LiveSessionControl):
+class SharedCanvasControl(SharedCanvasAssets, LiveSessionControl):
     """Custom canvas renderer wrapped in PsyNet's modular page API."""
 
     external_template = "shared_canvas.html"
@@ -657,7 +695,7 @@ class SharedCanvasControl(LiveSessionControl):
 
     @property
     def canvas_config(self):
-        world = self.trial.definition["world"]
+        world = self.trial.definition
         participants = sorted(self._get_group().active_participants, key=lambda p: p.id)
         participant_ids = [int(participant.id) for participant in participants]
         if not participant_ids:
@@ -669,6 +707,7 @@ class SharedCanvasControl(LiveSessionControl):
             "role": f"Player {role_index + 1}",
             "participant_id": participant_id,
             "world_id": world["world_id"],
+            "world_url": self.trial.assets["world"].url,
             "canvas_size": world["canvas_size"],
             "canvas_width": CANVAS_RENDER_WIDTH,
             "canvas_height": CANVAS_RENDER_HEIGHT,
@@ -683,12 +722,8 @@ class SharedCanvasControl(LiveSessionControl):
             "max_player_speed": world["max_player_speed"],
             "speed_limit_mph": world.get("speed_limit_mph", 30),
             "projection": world.get("projection", {}),
-            "storm_points": world.get("storm_points", []),
-            "chaser_tracks": world.get("chaser_tracks", [])[:STORM_CHASER_TRACK_COUNT],
             "storm_chaser_track_count": STORM_CHASER_TRACK_COUNT,
             "chaser_track_visible_ms": CHASER_TRACK_VISIBLE_MS,
-            "warnings": world.get("warnings", []),
-            "reward_events": world.get("reward_events", []),
             "timing": {
                 "game_start_ms": world.get("game_start_ms", 0),
                 "game_end_ms": world.get("game_end_ms", TRIAL_SECONDS * 1000),
@@ -721,6 +756,7 @@ class SharedCanvasTrial(StaticTrial):
             GroupBarrier(
                 id_="canvas_finished",
                 group_type=GROUP_TYPE,
+                waiting_logic=WaitPage(wait_time=0.5, save_answer=False),
                 on_release=self.score_canvas_game,
                 max_wait_time=90,
             ),
@@ -739,9 +775,10 @@ class SharedCanvasTrial(StaticTrial):
             SharedCanvasControl(self, participant),
             save_answer="shared_canvas_browser_answer",
             time_estimate=TRIAL_SECONDS + 5,
+            requires_full_page_reload=True,
         )
 
-    def score_canvas_game(self, participants: List[Participant]):
+    def score_canvas_game(self, participants: List[Participant], **kwargs):
         group = participants[0].active_sync_groups[GROUP_TYPE]
         node_id, network_id = CanvasGameState._current_trial_details(group)
         game_state = CanvasGameState.get_for_group(
@@ -773,7 +810,7 @@ class SharedCanvasTrial(StaticTrial):
                 return result
         return {
             "completed_live_canvas": False,
-            "world_id": self.definition["world"]["world_id"],
+            "world_id": self.definition["world_id"],
             "coin_bonus": 0.0,
             "raw_answer": raw_answer,
         }
@@ -798,11 +835,6 @@ class SharedCanvasTrial(StaticTrial):
             tags.p(f"Your coin bonus is ${bonus:.2f}.")
             tags.p("Thank you for exploring the shared map.")
         return InfoPage(content, time_estimate=5)
-
-
-class WorldNode(StaticNode):
-    def create_definition_from_seed(self, seed, experiment, participant):
-        return self.definition
 
 
 class Exp(psynet.experiment.Experiment):
@@ -836,9 +868,7 @@ class Exp(psynet.experiment.Experiment):
         StaticTrialMaker(
             id_="shared_canvas_worlds",
             trial_class=SharedCanvasTrial,
-            nodes=[
-                WorldNode(definition={"world": world}) for world in WORLD_DEFINITIONS
-            ],
+            nodes=get_world_nodes,
             expected_trials_per_participant=1,
             max_trials_per_participant=1,
             sync_group_type=GROUP_TYPE,

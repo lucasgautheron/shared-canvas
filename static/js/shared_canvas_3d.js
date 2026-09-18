@@ -223,13 +223,19 @@
         if (!serverStartRaw) return;
         if (serverStartedAt != null && !allowLargeJump) return;
         var serverStartMs = Date.parse(serverStartRaw);
+        var trialMs = Number(cfg.trial_seconds || 0) * 1000;
         if (Number.isFinite(serverStartMs)) {
-          serverStartedAt = now - Math.max(0, Date.now() - serverStartMs);
+          var elapsed = Math.max(0, Date.now() - serverStartMs);
+          if (trialMs > 0 && elapsed > trialMs + 2000) {
+            serverStartedAt = now;
+          } else {
+            serverStartedAt = now - elapsed;
+          }
         } else {
           serverStartedAt = now;
         }
         gameStarted = true;
-        gameEndsAt = serverStartedAt + cfg.trial_seconds * 1000;
+        gameEndsAt = serverStartedAt + trialMs;
         lastDrawAt = now;
         stormCursor = 0;
         activePotential = [];
@@ -865,7 +871,6 @@
             vx: own.vx,
             vy: own.vy,
             client_time: now,
-            low_latency: true,
           });
           return;
         }
@@ -877,7 +882,6 @@
           vy: own.vy,
           client_time: now,
           game_time_ms: gameTime(now),
-          low_latency: true,
         });
       }
 
@@ -914,10 +918,38 @@
           .catch(function () {});
       }
 
+      function stopLoops() {
+        if (drawHandle != null) {
+          window.cancelAnimationFrame(drawHandle);
+          drawHandle = null;
+        }
+        if (sendInterval != null) {
+          clearInterval(sendInterval);
+          sendInterval = null;
+        }
+        if (completionInterval != null) {
+          clearInterval(completionInterval);
+          completionInterval = null;
+        }
+        if (pollInterval != null) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+      }
+
+      function showFinishingOverlay() {
+        if (!waitingOverlay) return;
+        waitingOverlay.classList.remove("hidden");
+        waitingOverlay.textContent = isLobby
+          ? "Matching you with other players..."
+          : "Finishing...";
+      }
+
       function submitFinalAnswer() {
         if (submitted) return;
         submitted = true;
-        cleanup();
+        stopLoops();
+        showFinishingOverlay();
         psynet.nextPage({
           completed_live_canvas_browser: true,
           client_collected_coin_ids: collectedCoinIds,
@@ -1014,26 +1046,26 @@
       }
 
       var drawHandle = null;
+      var sendInterval = null;
+      var completionInterval = null;
+      var pollInterval = null;
       function loop() {
         tick(performance.now());
         drawHandle = window.requestAnimationFrame(loop);
       }
       drawHandle = window.requestAnimationFrame(loop);
-      var sendInterval = setInterval(sendPosition, cfg.send_interval_ms);
-      var completionInterval = isLobby ? null : setInterval(function () {
+      sendInterval = setInterval(sendPosition, cfg.send_interval_ms);
+      completionInterval = isLobby ? null : setInterval(function () {
         if (gameEndsAt != null && performance.now() >= gameEndsAt) submitFinalAnswer();
       }, 200);
-      var pollInterval = isLobby ? setInterval(pollLobbyRelease, 1000) : null;
+      pollInterval = isLobby ? setInterval(pollLobbyRelease, 1000) : null;
       if (isLobby) pollLobbyRelease();
 
       var cleanedUp = false;
       function cleanup() {
         if (cleanedUp) return;
         cleanedUp = true;
-        if (drawHandle != null) window.cancelAnimationFrame(drawHandle);
-        clearInterval(sendInterval);
-        if (completionInterval != null) clearInterval(completionInterval);
-        if (pollInterval != null) clearInterval(pollInterval);
+        stopLoops();
         unsubscribeHandlers.forEach(function (unsubscribe) {
           if (typeof unsubscribe === "function") unsubscribe();
         });

@@ -513,6 +513,7 @@ def build_world_from_session_dir(
     trial_seconds: int,
     coin_radius: int,
     coin_bonus: float,
+    include_browser_layers: bool = True,
 ) -> dict:
     session_path = Path(session_dir)
     label = session_path.name
@@ -520,7 +521,11 @@ def build_world_from_session_dir(
     warnings = _load_warnings(session_path / "warnings.csv")
     tornadoes = _load_tornadoes(session_path / "tornadoes.csv")
     spotter_initial_positions = _load_spotter_initial_positions(session_path / "spotters.csv")
-    spotter_tracks = _load_spotter_tracks(session_path / "spotters.csv")
+    spotter_tracks = (
+        _load_spotter_tracks(session_path / "spotters.csv")
+        if include_browser_layers
+        else []
+    )
     raw_min_ms, raw_max_ms = _time_window(storms, warnings, tornadoes)
     storm_coords = [
         (point[1], point[2])
@@ -534,27 +539,28 @@ def build_world_from_session_dir(
         return _game_ms(raw_ms, raw_min_ms, raw_max_ms, trial_seconds)
 
     storm_points = []
-    rendered_storms = _debug_storm_subset(storms, label=label)
-    for storm in rendered_storms:
-        for raw_ms, lat, lng, vil, max_dbz, mesh, cell_speed in storm["points"]:
-            xy = projection.project(lat, lng)
-            game_ms = game(raw_ms)
-            end_ms = max(
-                game(raw_ms + STORM_VISIBLE_MS),
-                game_ms + STORM_MIN_VISIBLE_GAME_MS,
-            )
-            storm_points.append(
-                [
-                    game_ms,
-                    min(trial_seconds * 1000, end_ms),
-                    xy["x"],
-                    xy["y"],
-                    vil,
-                    max_dbz,
-                    raw_ms,
-                ]
-            )
-    storm_points = _thin_storm_points(storm_points)
+    rendered_storms = _debug_storm_subset(storms, label=label) if include_browser_layers else []
+    if include_browser_layers:
+        for storm in rendered_storms:
+            for raw_ms, lat, lng, vil, max_dbz, mesh, cell_speed in storm["points"]:
+                xy = projection.project(lat, lng)
+                game_ms = game(raw_ms)
+                end_ms = max(
+                    game(raw_ms + STORM_VISIBLE_MS),
+                    game_ms + STORM_MIN_VISIBLE_GAME_MS,
+                )
+                storm_points.append(
+                    [
+                        game_ms,
+                        min(trial_seconds * 1000, end_ms),
+                        xy["x"],
+                        xy["y"],
+                        vil,
+                        max_dbz,
+                        raw_ms,
+                    ]
+                )
+        storm_points = _thin_storm_points(storm_points)
 
     spawn_points = []
     for spotter in spotter_initial_positions:
@@ -570,55 +576,56 @@ def build_world_from_session_dir(
         )
 
     chaser_tracks = []
-    for track in spotter_tracks:
-        points = []
-        for raw_ms, lat, lng, heading in track["points"]:
-            if raw_ms < raw_min_ms or raw_ms > raw_max_ms:
-                continue
-            xy = projection.project(lat, lng)
-            points.append(
-                [
-                    game(raw_ms),
-                    xy["x"],
-                    xy["y"],
-                    raw_ms,
-                    heading,
-                ]
-            )
-        if len(points) < 2:
-            continue
-        chaser_tracks.append(
-            {
-                "id": track["id"],
-                "name": track["name"],
-                "start_ms": points[0][0],
-                "end_ms": points[-1][0],
-                "points": points,
-            }
-        )
-
     rendered_warnings = []
-    for warning in warnings:
-        rendered_warnings.append(
-            {
-                "id": warning["id"],
-                "event": warning["event"],
-                "headline": warning["headline"],
-                "sender": warning["sender"],
-                "eff_ms": game(warning["eff_ms"]),
-                "exp_ms": game(warning["exp_ms"]),
-                "polygons": [
+    if include_browser_layers:
+        for track in spotter_tracks:
+            points = []
+            for raw_ms, lat, lng, heading in track["points"]:
+                if raw_ms < raw_min_ms or raw_ms > raw_max_ms:
+                    continue
+                xy = projection.project(lat, lng)
+                points.append(
                     [
-                        [
-                            projection.project(lat, lng)["x"],
-                            projection.project(lat, lng)["y"],
-                        ]
-                        for lat, lng in polygon
+                        game(raw_ms),
+                        xy["x"],
+                        xy["y"],
+                        raw_ms,
+                        heading,
                     ]
-                    for polygon in warning["polygons"]
-                ],
-            }
-        )
+                )
+            if len(points) < 2:
+                continue
+            chaser_tracks.append(
+                {
+                    "id": track["id"],
+                    "name": track["name"],
+                    "start_ms": points[0][0],
+                    "end_ms": points[-1][0],
+                    "points": points,
+                }
+            )
+
+        for warning in warnings:
+            rendered_warnings.append(
+                {
+                    "id": warning["id"],
+                    "event": warning["event"],
+                    "headline": warning["headline"],
+                    "sender": warning["sender"],
+                    "eff_ms": game(warning["eff_ms"]),
+                    "exp_ms": game(warning["exp_ms"]),
+                    "polygons": [
+                        [
+                            [
+                                projection.project(lat, lng)["x"],
+                                projection.project(lat, lng)["y"],
+                            ]
+                            for lat, lng in polygon
+                        ]
+                        for polygon in warning["polygons"]
+                    ],
+                }
+            )
 
     reward_targets = []
     reward_events = []
@@ -649,18 +656,19 @@ def build_world_from_session_dir(
                 "state": tornado["state"],
             }
         )
-        reward_events.append(
-            {
-                "id": tornado["id"],
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "x": point["x"],
-                "y": point["y"],
-                "line": line,
-                "radius": reward_radius_px,
-                "radius_miles": TORNADO_REWARD_RADIUS_MILES,
-            }
-        )
+        if include_browser_layers:
+            reward_events.append(
+                {
+                    "id": tornado["id"],
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "x": point["x"],
+                    "y": point["y"],
+                    "line": line,
+                    "radius": reward_radius_px,
+                    "radius_miles": TORNADO_REWARD_RADIUS_MILES,
+                }
+            )
 
     seed = int(hashlib.sha256(label.encode("utf-8")).hexdigest()[:8], 16)
     return {
@@ -682,6 +690,7 @@ def build_world_from_session_dir(
         "raw_time_max_ms": raw_max_ms,
         "game_start_ms": 0,
         "game_end_ms": trial_seconds * 1000,
+        "trial_seconds": trial_seconds,
         "projection": projection.metadata(),
         "debug_storm_fraction": DEBUG_STORM_FRACTION,
         "storm_min_visible_game_ms": STORM_MIN_VISIBLE_GAME_MS,
@@ -728,6 +737,7 @@ def load_world_definitions(
     trial_seconds: int,
     coin_radius: int,
     coin_bonus: float,
+    include_browser_layers: bool = True,
 ) -> list[dict]:
     session_dirs = discover_session_dirs(static_root)
     if not session_dirs:
@@ -743,9 +753,82 @@ def load_world_definitions(
             trial_seconds=trial_seconds,
             coin_radius=coin_radius,
             coin_bonus=coin_bonus,
+            include_browser_layers=include_browser_layers,
         )
         for session_dir in session_dirs
     ]
+
+
+NODE_DEFINITION_KEYS = (
+    "world_id",
+    "session_label",
+    "seed",
+    "canvas_size",
+    "player_radius",
+    "coin_radius",
+    "coin_bonus",
+    "max_player_speed",
+    "speed_limit_mph",
+    "raw_time_min_ms",
+    "raw_time_max_ms",
+    "game_start_ms",
+    "game_end_ms",
+    "trial_seconds",
+    "projection",
+    "spawn_points",
+    "reward_targets",
+)
+
+BROWSER_WORLD_KEYS = (
+    "storm_points",
+    "chaser_tracks",
+    "warnings",
+    "reward_events",
+)
+
+
+def node_definition_from_world(world: dict) -> dict:
+    return {key: world[key] for key in NODE_DEFINITION_KEYS}
+
+
+def browser_world_payload(world: dict) -> dict:
+    return {key: world.get(key, []) for key in BROWSER_WORLD_KEYS}
+
+
+def session_dir_for_label(
+    static_root: str | os.PathLike[str],
+    session_label: str,
+) -> Path:
+    for session_dir in discover_session_dirs(static_root):
+        if session_dir.name == session_label:
+            return session_dir
+    raise RuntimeError(
+        f"No streamlined session folder named {session_label!r} under {static_root}."
+    )
+
+
+def write_world_json(
+    path,
+    session_label,
+    canvas_size,
+    trial_seconds,
+    coin_radius,
+    coin_bonus,
+):
+    """Write browser-only map arrays for a PsyNet cached function asset."""
+    static_root = Path(__file__).resolve().parent / "static"
+    world = build_world_from_session_dir(
+        session_dir_for_label(static_root, session_label),
+        canvas_size=canvas_size,
+        trial_seconds=trial_seconds,
+        coin_radius=coin_radius,
+        coin_bonus=coin_bonus,
+        include_browser_layers=True,
+    )
+    Path(path).write_text(
+        json.dumps(browser_world_payload(world)),
+        encoding="utf-8",
+    )
 
 
 def public_world_payload(world: dict) -> dict:
