@@ -10,8 +10,8 @@
   var ACCELERATION = 900;
   var BRAKE = 1100;
   var COAST_FRICTION = 0.92;
-  var WORLD_SCALE = 24;
-  var GRID_DIVISIONS = 320;
+  var WORLD_SCALE = 48;
+  var GRID_DIVISIONS = 640;
   var MAX_MAP_STORMS = 1200;
   var OVERVIEW_HEIGHT_RATIO = 0.54;
   var BORDER_MARGIN_MILES = 25;
@@ -206,6 +206,9 @@
       var zoomLabel = document.getElementById("zoom-label");
       var bonusPill = document.querySelector(".bonus-pill");
       var gameTimeLeft = document.getElementById("game-time-left");
+      var speedGauge = document.getElementById("speed-gauge");
+      var speedGaugeFill = document.getElementById("speed-gauge-fill");
+      var speedGaugeValue = document.getElementById("speed-gauge-value");
       var canvasWidth = Number(cfg.canvas_width || 960);
       var canvasHeight = Number(cfg.canvas_height || 540);
       var canvasSize = Number(cfg.canvas_size || 640);
@@ -611,6 +614,24 @@
           ":" +
           String(seconds).padStart(2, "0");
         gameTimeLeft.dateTime = "PT" + String(remainingSeconds) + "S";
+      }
+
+      function updateSpeedGauge() {
+        if (!speedGauge) return;
+        var maxSpeed = Number(cfg.max_player_speed || 0);
+        var speedLimitMph = Number(cfg.speed_limit_mph || 60);
+        var speedRatio = maxSpeed > 0
+          ? Math.min(1, Math.abs(Number(own.speed) || 0) / maxSpeed)
+          : 0;
+        var speedMph = Math.round(speedRatio * speedLimitMph);
+        speedGauge.setAttribute("aria-valuemax", String(speedLimitMph));
+        speedGauge.setAttribute("aria-valuenow", String(speedMph));
+        if (speedGaugeFill) {
+          speedGaugeFill.style.width = String(Math.round(speedRatio * 100)) + "%";
+        }
+        if (speedGaugeValue) {
+          speedGaugeValue.textContent = String(speedMph) + " mph";
+        }
       }
 
       function updateWaitingOverlay(readyIds) {
@@ -1908,11 +1929,13 @@
       function tick(now) {
         updateCountdown(now);
         if (!gameStarted) {
+          updateSpeedGauge();
           lastDrawAt = now;
           renderFrame(0, now);
           return;
         }
         integrateOwnPlayer(now);
+        updateSpeedGauge();
         var t = isLobby ? 0 : gameTime(now);
         if (!isLobby) {
           if (isTutorial) {

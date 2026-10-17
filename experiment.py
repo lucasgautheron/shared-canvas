@@ -45,7 +45,7 @@ def _introduction_page() -> InfoPage:
     with content:
         tags.h2("Airdrop collection game")
         tags.p("You will navigate a map and collect airdrops.")
-        tags.p("Each airdrop you collect adds $0.10.")
+        tags.p("Each airdrop you collect gives you $0.10.")
         tags.p("You will receive hints to help you locate incoming airdrops.")
         tags.p(condition_paragraph)
         tags.p("Click Next to take the tutorial.")

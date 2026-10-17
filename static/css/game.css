@@ -337,6 +337,49 @@
   display: inline-block;
   width: min(1000px, 96vw);
 }
+.speed-gauge {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: auto 4.5rem auto;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid rgba(34, 51, 77, 0.5);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, 0.82);
+  color: #22334d;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.speed-gauge-label {
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.speed-gauge-track {
+  height: 0.42rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(34, 51, 77, 0.18);
+}
+.speed-gauge-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #4f8cff;
+  transition: width 80ms linear;
+}
+.speed-gauge-value {
+  min-width: 3.5rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-align: right;
+}
 #overview-map {
   position: absolute;
   top: 12px;

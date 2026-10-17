@@ -17,7 +17,7 @@
     },
     airplane_sighting: {
       title: "Drive to an airplane sighting",
-      instruction: "Colored squares on the overview map are airplane sightings. The scale below runs from low to high confidence; higher-confidence sightings may help you locate an airdrop. Follow the arrow and drive to the highlighted square.",
+      instruction: "Colored squares on the overview map are airplane sightings. The scale below runs from low to high confidence. Follow the arrow and drive to the highlighted square.",
     },
     landing_zone_medium: {
       title: "Drive to a possible landing zone",

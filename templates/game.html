@@ -73,6 +73,13 @@
   {% endif %}
   <div class="canvas-stage">
     <canvas id="game-canvas" width="{{ params.canvas_config.canvas_width }}" height="{{ params.canvas_config.canvas_height }}" tabindex="0" aria-label="{% if is_lobby %}3D waiting room{% elif is_tutorial %}3D driving tutorial{% else %}3D airdrop driving area{% endif %}"></canvas>
+    <div id="speed-gauge" class="speed-gauge" role="meter" aria-label="Car speed" aria-valuemin="0" aria-valuemax="60" aria-valuenow="0">
+      <span class="speed-gauge-label">Speed</span>
+      <span class="speed-gauge-track" aria-hidden="true">
+        <span id="speed-gauge-fill" class="speed-gauge-fill"></span>
+      </span>
+      <output id="speed-gauge-value" class="speed-gauge-value">0 mph</output>
+    </div>
     {% if is_tutorial %}
     <div id="tutorial-timer" class="tutorial-timer">Read: 10 s</div>
     {% endif %}
