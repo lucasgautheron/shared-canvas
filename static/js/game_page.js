@@ -1,4 +1,4 @@
-/* global SharedCanvas3D, THREE */
+/* global Game3D, THREE */
 
 export function activate({ vars, psynet }) {
   const config = vars.canvas_config;
@@ -29,11 +29,11 @@ export function activate({ vars, psynet }) {
   }
 
   function start() {
-    if (typeof THREE === "undefined" || !window.SharedCanvas3D) {
-      throw new Error("Three.js storm-chase client failed to load.");
+    if (typeof THREE === "undefined" || !window.Game3D) {
+      throw new Error("Three.js airdrop game client failed to load.");
     }
     worldPromise.then(mergeWorld).then(() => {
-      SharedCanvas3D.start(config);
+      Game3D.start(config);
     });
   }
 
