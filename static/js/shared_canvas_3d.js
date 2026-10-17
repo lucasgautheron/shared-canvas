@@ -5,11 +5,13 @@
   var CAR_LENGTH = 18;
   var CAR_WIDTH = 10;
   var CAR_HEIGHT = 5;
+  var CAR_ARROW_TARGET_HEIGHT = 22;
   var STEER_RATE = 2.6;
   var ACCELERATION = 900;
   var BRAKE = 1100;
   var COAST_FRICTION = 0.92;
   var WORLD_SCALE = 24;
+  var GRID_DIVISIONS = 320;
   var MAX_MAP_STORMS = 1200;
   var OVERVIEW_HEIGHT_RATIO = 0.54;
   var BORDER_MARGIN_MILES = 25;
@@ -40,8 +42,7 @@
   function zoneCssColor(eventName) {
     var event = String(eventName || "").toLowerCase();
     if (event.indexOf("tornado") >= 0) return "rgba(228, 26, 28, 0.30)";
-    if (event.indexOf("severe") >= 0) return "rgba(255, 204, 51, 0.26)";
-    return "rgba(55, 126, 184, 0.22)";
+    return "rgba(255, 204, 51, 0.26)";
   }
 
   function hexToRgb(hex) {
@@ -69,24 +70,106 @@
 
   function makeCar(color, scale) {
     var group = new THREE.Group();
-    var body = new THREE.Mesh(
-      new THREE.BoxGeometry(CAR_LENGTH * scale, CAR_HEIGHT * scale, CAR_WIDTH * scale),
-      new THREE.MeshStandardMaterial({ color: color, roughness: 0.45, metalness: 0.15 })
-    );
-    body.position.y = CAR_HEIGHT * scale * 0.55;
-    var cabin = new THREE.Mesh(
-      new THREE.BoxGeometry(CAR_LENGTH * 0.42 * scale, CAR_HEIGHT * 0.7 * scale, CAR_WIDTH * 0.82 * scale),
-      new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.3 })
-    );
-    cabin.position.set(CAR_LENGTH * 0.08 * scale, CAR_HEIGHT * scale * 1.15, 0);
-    var nose = new THREE.Mesh(
-      new THREE.BoxGeometry(CAR_LENGTH * 0.18 * scale, CAR_HEIGHT * 0.25 * scale, CAR_WIDTH * 0.55 * scale),
-      new THREE.MeshStandardMaterial({ color: 0xf8fafc })
-    );
-    nose.position.set(CAR_LENGTH * 0.42 * scale, CAR_HEIGHT * scale * 0.7, 0);
-    group.add(body);
-    group.add(cabin);
-    group.add(nose);
+    var bodyMaterial = new THREE.MeshStandardMaterial({
+      color: color,
+      roughness: 0.34,
+      metalness: 0.32,
+    });
+    var glassMaterial = new THREE.MeshStandardMaterial({
+      color: 0x17283a,
+      roughness: 0.18,
+      metalness: 0.25,
+    });
+    var tireMaterial = new THREE.MeshStandardMaterial({
+      color: 0x111827,
+      roughness: 0.9,
+    });
+    var metalMaterial = new THREE.MeshStandardMaterial({
+      color: 0xaeb8c4,
+      roughness: 0.3,
+      metalness: 0.75,
+    });
+    var headlightMaterial = new THREE.MeshStandardMaterial({
+      color: 0xfff4c2,
+      emissive: 0xffd86b,
+      emissiveIntensity: 0.65,
+    });
+    var tailLightMaterial = new THREE.MeshStandardMaterial({
+      color: 0xc81e1e,
+      emissive: 0x7f1010,
+      emissiveIntensity: 0.55,
+    });
+    var beaconMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffb000,
+      emissive: 0xff7a00,
+      emissiveIntensity: 0.55,
+    });
+
+    function addBox(width, height, depth, x, y, z, material) {
+      var mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(width * scale, height * scale, depth * scale),
+        material
+      );
+      mesh.position.set(x * scale, y * scale, z * scale);
+      group.add(mesh);
+      return mesh;
+    }
+
+    var wheelRadius = 2.35;
+    var wheelY = wheelRadius;
+    addBox(CAR_LENGTH, CAR_HEIGHT * 0.72, CAR_WIDTH, 0, 4.1, 0, bodyMaterial);
+    addBox(CAR_LENGTH * 0.34, CAR_HEIGHT * 0.34, CAR_WIDTH * 0.92, 5.7, 6.3, 0, bodyMaterial);
+    addBox(CAR_LENGTH * 0.24, CAR_HEIGHT * 0.32, CAR_WIDTH * 0.94, -6.8, 6.2, 0, bodyMaterial);
+
+    // Colored cabin shell with inset windows leaves a visible roof and pillars.
+    addBox(CAR_LENGTH * 0.47, CAR_HEIGHT * 0.92, CAR_WIDTH * 0.82, -0.5, 8.2, 0, bodyMaterial);
+    addBox(CAR_LENGTH * 0.35, 0.55, CAR_WIDTH * 0.72, -0.5, 10.75, 0, bodyMaterial);
+    addBox(0.18, 2.65, CAR_WIDTH * 0.58, 3.8, 8.25, 0, glassMaterial);
+    addBox(0.18, 2.65, CAR_WIDTH * 0.58, -4.8, 8.25, 0, glassMaterial);
+    addBox(CAR_LENGTH * 0.34, 2.65, 0.18, -0.5, 8.25, CAR_WIDTH * 0.415, glassMaterial);
+    addBox(CAR_LENGTH * 0.34, 2.65, 0.18, -0.5, 8.25, -CAR_WIDTH * 0.415, glassMaterial);
+    addBox(0.45, 3.0, CAR_WIDTH * 0.86, -0.5, 8.25, 0, bodyMaterial);
+
+    [-5.8, 5.8].forEach(function (x) {
+      [-CAR_WIDTH * 0.53, CAR_WIDTH * 0.53].forEach(function (z) {
+        var wheel = new THREE.Mesh(
+          new THREE.CylinderGeometry(
+            wheelRadius * scale,
+            wheelRadius * scale,
+            1.45 * scale,
+            20
+          ),
+          tireMaterial
+        );
+        wheel.rotation.x = Math.PI / 2;
+        wheel.position.set(x * scale, wheelY * scale, z * scale);
+        group.add(wheel);
+        var hub = new THREE.Mesh(
+          new THREE.CylinderGeometry(
+            wheelRadius * 0.46 * scale,
+            wheelRadius * 0.46 * scale,
+            1.58 * scale,
+            16
+          ),
+          metalMaterial
+        );
+        hub.rotation.x = Math.PI / 2;
+        hub.position.copy(wheel.position);
+        group.add(hub);
+      });
+    });
+
+    [-3.15, 3.15].forEach(function (z) {
+      addBox(0.28, 1.25, 2.15, CAR_LENGTH * 0.51, 4.7, z, headlightMaterial);
+      addBox(0.28, 1.25, 2.15, -CAR_LENGTH * 0.51, 4.7, z, tailLightMaterial);
+    });
+    addBox(0.4, 0.7, CAR_WIDTH * 0.82, CAR_LENGTH * 0.51, 2.9, 0, metalMaterial);
+    addBox(0.4, 0.7, CAR_WIDTH * 0.82, -CAR_LENGTH * 0.51, 2.9, 0, metalMaterial);
+    addBox(0.3, 1.15, 2.5, -CAR_LENGTH * 0.52, 4.1, 0, metalMaterial);
+
+    // A roof-mounted amber light bar gives the storm-chaser car a clear silhouette.
+    addBox(1.8, 0.28, 5.8, -0.5, 11.15, 0, tireMaterial);
+    addBox(1.55, 0.58, 5.35, -0.5, 11.55, 0, beaconMaterial);
     return group;
   }
 
@@ -98,6 +181,10 @@
   root.SharedCanvas3D = {
     start: function startSharedCanvas3D(cfg) {
       var isLobby = cfg.mode === "lobby";
+      var isTutorial = cfg.mode === "tutorial";
+      var experimentCondition = String(cfg.experiment_condition || "live");
+      var usesReplayCars = !isLobby && !isTutorial && experimentCondition === "social";
+      var usesLivePeers = !isLobby && !isTutorial && experimentCondition === "live";
       var participantId = String(
         cfg.participant_id ||
         (psynet.session && psynet.session.participant_id) ||
@@ -109,22 +196,38 @@
       var overviewCtx = overviewCanvas ? overviewCanvas.getContext("2d") : null;
       var zoomSlider = document.getElementById("zoom-slider");
       var zoomLabel = document.getElementById("zoom-label");
+      var tutorialPanel = document.getElementById("tutorial-panel");
+      var tutorialProgress = document.getElementById("tutorial-progress");
+      var tutorialTitle = document.getElementById("tutorial-title");
+      var tutorialInstruction = document.getElementById("tutorial-instruction");
+      var tutorialSightingScale = document.getElementById("tutorial-sighting-scale");
+      var tutorialContinue = document.getElementById("tutorial-continue");
       var canvasWidth = Number(cfg.canvas_width || 960);
       var canvasHeight = Number(cfg.canvas_height || 540);
       var canvasSize = Number(cfg.canvas_size || 640);
       var pxPerMile = Number((cfg.projection || {}).px_per_mile || 1);
-      var viewportMiles = zoomSlider ? Number(zoomSlider.value || 750) : 750;
+      var viewportMiles = zoomSlider
+        ? Number(zoomSlider.value || 750)
+        : (isTutorial ? 40 : 750);
       var initialPlayers = cfg.initial_players || {};
       var players = {};
+      var replayPlayers = {};
       var stormPoints = (cfg.storm_points || []).slice();
       var stormCursor = 0;
       var activePotential = [];
       var lastPotentialTime = 0;
-      var chaserTracks = (cfg.chaser_tracks || []).slice();
-      var chaserTrackVisibleMs = Number(cfg.chaser_track_visible_ms || 30 * 60 * 1000);
+      var chaserTracks = usesReplayCars ? (cfg.chaser_tracks || []).slice() : [];
       var warnings = cfg.warnings || [];
       var rewardEvents = cfg.reward_events || [];
       var timing = cfg.timing || {};
+      var tutorialCfg = cfg.tutorial || {};
+      var tutorialSteps = tutorialCfg.steps || [];
+      var tutorialStepIndex = 0;
+      var tutorialStepStartedAt = performance.now();
+      var tutorialCompletedSteps = [];
+      var tutorialStepElapsedMs = {};
+      var tutorialStartPosition = null;
+      var tutorialArrow = null;
       var serverStartedAt = null;
       var gameEndsAt = null;
       var collectedCoinIds = [];
@@ -158,10 +261,11 @@
       );
       own.heading = headingFromVelocity(own.vx, own.vy, 0);
       own.speed = Math.hypot(Number(own.vx) || 0, Number(own.vy) || 0);
+      tutorialStartPosition = { x: own.x, y: own.y };
       var bonus = 0;
       var lastDrawAt = performance.now();
       var submitted = false;
-      var gameStarted = isLobby;
+      var gameStarted = isLobby || isTutorial;
       var renderer = null;
       var scene = null;
       var camera = null;
@@ -188,34 +292,130 @@
       });
       players[participantId] = Object.assign({}, own);
 
+      function currentTutorialStep() {
+        return isTutorial ? tutorialSteps[tutorialStepIndex] : null;
+      }
+
+      function updateTutorialCopy() {
+        if (!isTutorial) return;
+        var step = currentTutorialStep();
+        var copy = {
+          movement: {
+            title: "Learn to move your car",
+            instruction: "Use the arrow keys or WASD to drive. Follow the 3D arrow and move away from your starting point.",
+          },
+          airdrop: {
+            title: "Collect an airdrop",
+            instruction: "The transparent yellow cylinder marks an airdrop. Follow the arrows and drive into it.",
+          },
+          airplane_sighting: {
+            title: "Drive to an airplane sighting",
+            instruction: "Colored squares on the overview map are airplane sightings. The scale below runs from low to high strength; stronger sightings may help you locate an airdrop. Follow the arrow and drive to the highlighted square.",
+          },
+          landing_zone_medium: {
+            title: "Drive to a medium-chance landing zone",
+            instruction: "Yellow polygons are potential landing zones with a medium chance of receiving an airdrop. Follow the arrow and drive inside the highlighted yellow polygon.",
+          },
+          landing_zone_high: {
+            title: "Drive to a higher-chance landing zone",
+            instruction: "Red polygons are potential landing zones with a higher chance of receiving an airdrop. Follow the arrow and drive inside the highlighted red polygon.",
+          },
+          other_car: {
+            title: "Watch for other cars",
+            instruction: "Other cars may move through the same space. The arrows point to a demonstration car driving around you. Press Enter to finish.",
+          },
+        }[step];
+        if (!copy) return;
+        if (tutorialPanel) {
+          tutorialPanel.dataset.step = step;
+          tutorialPanel.dataset.condition = experimentCondition;
+        }
+        if (tutorialProgress) {
+          tutorialProgress.textContent =
+            "Step " + String(tutorialStepIndex + 1) + " of " + String(tutorialSteps.length);
+        }
+        if (tutorialTitle) tutorialTitle.textContent = copy.title;
+        if (tutorialInstruction) tutorialInstruction.textContent = copy.instruction;
+        if (tutorialSightingScale) {
+          tutorialSightingScale.classList.toggle(
+            "hidden",
+            step !== "airplane_sighting"
+          );
+        }
+        if (tutorialContinue) {
+          var needsConfirmation = step === "other_car";
+          tutorialContinue.classList.toggle("hidden", !needsConfirmation);
+          tutorialContinue.textContent = step === "other_car" ? "Finish tutorial" : "Continue";
+        }
+      }
+
+      function submitTutorialAnswer(now) {
+        if (submitted) return;
+        submitted = true;
+        stopLoops();
+        if (tutorialPanel) tutorialPanel.dataset.step = "complete";
+        psynet.nextPage({
+          completed_tutorial: true,
+          experiment_condition: experimentCondition,
+          participant_id: Number(participantId),
+          completed_steps: tutorialCompletedSteps.slice(),
+          step_elapsed_ms: Object.assign({}, tutorialStepElapsedMs),
+          final_position: { x: own.x, y: own.y, vx: own.vx, vy: own.vy },
+          completed_at_ms: Math.round(now),
+        });
+      }
+
+      function advanceTutorial(now) {
+        if (!isTutorial || submitted) return;
+        var step = currentTutorialStep();
+        if (!step) return;
+        tutorialCompletedSteps.push(step);
+        tutorialStepElapsedMs[step] = Math.max(0, Math.round(now - tutorialStepStartedAt));
+        tutorialStepIndex += 1;
+        tutorialStepStartedAt = now;
+        tutorialStartPosition = { x: own.x, y: own.y };
+        if (tutorialStepIndex >= tutorialSteps.length) {
+          submitTutorialAnswer(now);
+          return;
+        }
+        updateTutorialCopy();
+      }
+
+      function handleTutorialContinue() {
+        var step = currentTutorialStep();
+        if (step !== "other_car") return;
+        advanceTutorial(performance.now());
+        focusCanvas();
+      }
+
       function gameTime(now) {
         if (serverStartedAt == null) return 0;
         return Math.min(cfg.trial_seconds * 1000, Math.max(0, now - serverStartedAt));
       }
 
-      function rawTimeForGameTime(t) {
-        var rawMin = Number(timing.raw_time_min_ms);
-        var rawMax = Number(timing.raw_time_max_ms);
-        var gameEnd = Number(timing.game_end_ms || cfg.trial_seconds * 1000);
-        if (!Number.isFinite(rawMin) || !Number.isFinite(rawMax) || rawMax <= rawMin || gameEnd <= 0) {
-          return null;
-        }
-        return rawMin + Math.max(0, Math.min(1, Number(t || 0) / gameEnd)) * (rawMax - rawMin);
-      }
-
       function updateWaitingOverlay(readyIds) {
         if (!waitingOverlay) return;
+        if (isTutorial) {
+          waitingOverlay.classList.add("hidden");
+          return;
+        }
         if (isLobby) {
           waitingOverlay.classList.remove("hidden");
-          waitingOverlay.textContent = "Waiting for other players";
+          waitingOverlay.textContent = experimentCondition === "live"
+            ? "Waiting for other players"
+            : "Preparing your airdrop session...";
           return;
         }
         waitingOverlay.classList.toggle("hidden", gameStarted);
         if (!gameStarted) {
           var readyCount = Array.isArray(readyIds) ? readyIds.length : 0;
-          waitingOverlay.textContent = readyCount > 0
-            ? "Waiting for other participants... (" + readyCount + " ready)"
-            : "Waiting for other participants...";
+          if (usesLivePeers) {
+            waitingOverlay.textContent = readyCount > 0
+              ? "Waiting for other participants... (" + readyCount + " ready)"
+              : "Waiting for other participants...";
+          } else {
+            waitingOverlay.textContent = "Starting your airdrop session...";
+          }
         }
       }
 
@@ -302,7 +502,7 @@
       }
 
       function wsSend(payload) {
-        if (submitted) return;
+        if (submitted || isTutorial) return;
         var type = payload.type;
         if (!type) return;
         var message = Object.assign({}, payload);
@@ -424,6 +624,233 @@
         });
       }
 
+      function headingFromTrackPoint(value, fallback) {
+        if (value == null || value === "") return fallback || 0;
+        var degrees = Number(value);
+        if (!Number.isFinite(degrees)) return fallback || 0;
+        return (degrees - 90) * Math.PI / 180;
+      }
+
+      function replayPlayerAt(track, trackIndex, t, now) {
+        var points = track.points || [];
+        if (points.length < 2) return null;
+        if (t < Number(points[0][0]) || t > Number(points[points.length - 1][0])) {
+          return null;
+        }
+
+        var low = 0;
+        var high = points.length - 1;
+        while (low < high - 1) {
+          var mid = Math.floor((low + high) / 2);
+          if (Number(points[mid][0]) <= t) low = mid;
+          else high = mid;
+        }
+        var pointA = points[low];
+        var pointB = points[Math.min(low + 1, points.length - 1)];
+        if (Number(pointB[0]) < t && low + 2 < points.length) {
+          pointB = points[low + 2];
+        }
+        var duration = Math.max(1, Number(pointB[0]) - Number(pointA[0]));
+        var amount = clamp((t - Number(pointA[0])) / duration, 0, 1);
+        var x = Number(pointA[1]) + (Number(pointB[1]) - Number(pointA[1])) * amount;
+        var y = Number(pointA[2]) + (Number(pointB[2]) - Number(pointA[2])) * amount;
+        var vx = (Number(pointB[1]) - Number(pointA[1])) / (duration / 1000);
+        var vy = (Number(pointB[2]) - Number(pointA[2])) / (duration / 1000);
+        var fallbackHeading = headingFromTrackPoint(
+          pointA[4] != null ? pointA[4] : pointB[4],
+          0
+        );
+        return {
+          participant_id: "replay:" + String(track.id || trackIndex),
+          label: "Recorded driver " + String(trackIndex + 1),
+          color: CHASER_TRACK_COLORS[trackIndex % CHASER_TRACK_COLORS.length],
+          x: x,
+          y: y,
+          vx: vx,
+          vy: vy,
+          heading: headingFromVelocity(vx, vy, fallbackHeading),
+          received_at: now,
+        };
+      }
+
+      function updateReplayPlayers(t, now) {
+        var nextPlayers = {};
+        if (usesReplayCars) {
+          chaserTracks.forEach(function (track, trackIndex) {
+            var player = replayPlayerAt(track, trackIndex, t, now);
+            if (player) nextPlayers[player.participant_id] = player;
+          });
+        }
+        Object.keys(replayPlayers).forEach(function (id) {
+          if (nextPlayers[id] || !carMeshes[id]) return;
+          scene.remove(carMeshes[id]);
+          delete carMeshes[id];
+        });
+        replayPlayers = nextPlayers;
+      }
+
+      function updateTutorialDemoCar(now) {
+        if (!isTutorial) return;
+        var demo = tutorialCfg.demo_car || {};
+        var id = String(demo.participant_id || "tutorial:other-car");
+        if (currentTutorialStep() !== "other_car") {
+          canvas.dataset.tutorialDemoCarVisible = "false";
+          delete replayPlayers[id];
+          if (carMeshes[id]) {
+            scene.remove(carMeshes[id]);
+            delete carMeshes[id];
+          }
+          return;
+        }
+        var radius = Number(demo.orbit_radius || 3.5);
+        var periodMs = Math.max(1000, Number(demo.orbit_seconds || 8) * 1000);
+        var angle = (now - tutorialStepStartedAt) / periodMs * Math.PI * 2;
+        var angularSpeed = Math.PI * 2 / (periodMs / 1000);
+        var vx = -Math.sin(angle) * radius * angularSpeed;
+        var vy = Math.cos(angle) * radius * angularSpeed;
+        replayPlayers[id] = {
+          participant_id: id,
+          label: demo.label || "Another driver",
+          color: demo.color || "#d62728",
+          x: own.x + Math.cos(angle) * radius,
+          y: own.y + Math.sin(angle) * radius,
+          vx: vx,
+          vy: vy,
+          heading: headingFromVelocity(vx, vy, 0),
+          received_at: now,
+        };
+        canvas.dataset.tutorialDemoCarVisible = "true";
+      }
+
+      function tutorialArrowTarget() {
+        var step = currentTutorialStep();
+        if (step === "movement") {
+          return {
+            x: own.x + Math.cos(own.heading) * 4,
+            y: own.y + Math.sin(own.heading) * 4,
+          };
+        }
+        if (step === "airdrop") {
+          return rewardEvents.find(function (event) {
+            return String(event.id) === String(tutorialCfg.reward_id);
+          }) || null;
+        }
+        if (step === "other_car") {
+          var demoId = String((tutorialCfg.demo_car || {}).participant_id || "tutorial:other-car");
+          return replayPlayers[demoId] || null;
+        }
+        return null;
+      }
+
+      function updateTutorialArrow() {
+        if (!tutorialArrow) return;
+        var target = tutorialArrowTarget();
+        if (!target) {
+          tutorialArrow.visible = false;
+          canvas.dataset.tutorialArrowVisible = "false";
+          return;
+        }
+        var targetHeight =
+          currentTutorialStep() === "other_car" ? CAR_ARROW_TARGET_HEIGHT : 4;
+        var targetVector = new THREE.Vector3(
+          worldX(target.x),
+          targetHeight,
+          worldZ(target.y)
+        );
+        var origin = new THREE.Vector3(targetVector.x, 64, targetVector.z);
+        var direction = targetVector.clone().sub(origin);
+        var distance = direction.length();
+        if (distance < 0.001) {
+          tutorialArrow.visible = false;
+          canvas.dataset.tutorialArrowVisible = "false";
+          return;
+        }
+        direction.normalize();
+        tutorialArrow.position.copy(origin);
+        tutorialArrow.setDirection(direction);
+        tutorialArrow.setLength(distance, 18, 10);
+        tutorialArrow.visible = true;
+        canvas.dataset.tutorialArrowVisible = "true";
+      }
+
+      function reachedTutorialHint(hint, radius) {
+        if (!hint) return false;
+        var x = Number(hint.x);
+        var y = Number(hint.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+        return Math.hypot(own.x - x, own.y - y) <= radius;
+      }
+
+      function pointInPolygon(x, y, polygon) {
+        var inside = false;
+        for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+          var xi = Number(polygon[i][0]);
+          var yi = Number(polygon[i][1]);
+          var xj = Number(polygon[j][0]);
+          var yj = Number(polygon[j][1]);
+          var crosses = (yi > y) !== (yj > y) &&
+            x < (xj - xi) * (y - yi) / (yj - yi) + xi;
+          if (crosses) inside = !inside;
+        }
+        return inside;
+      }
+
+      function reachedTutorialZone(highPriority) {
+        return warnings.some(function (warning) {
+          var isHighPriority =
+            String(warning.event || "").toLowerCase().indexOf("tornado") >= 0;
+          if (isHighPriority !== highPriority) return false;
+          return (warning.polygons || []).some(function (polygon) {
+            return polygon.length >= 3 && pointInPolygon(own.x, own.y, polygon);
+          });
+        });
+      }
+
+      function updateTutorial(now) {
+        if (!isTutorial || submitted) return;
+        var step = currentTutorialStep();
+        if (step === "movement") {
+          var distanceMoved = Math.hypot(
+            own.x - tutorialStartPosition.x,
+            own.y - tutorialStartPosition.y
+          );
+          if (distanceMoved >= Number(tutorialCfg.movement_threshold || 1.5)) {
+            advanceTutorial(now);
+          }
+        } else if (step === "airdrop") {
+          var reward = rewardEvents.find(function (event) {
+            return String(event.id) === String(tutorialCfg.reward_id);
+          });
+          if (
+            reward &&
+            distanceToRewardEvent(reward) <= Number(reward.radius || cfg.coin_radius)
+          ) {
+            collectedCoinIds.push(String(reward.id));
+            advanceTutorial(now);
+          }
+        } else if (
+          step === "airplane_sighting" &&
+          reachedTutorialHint(
+            tutorialCfg.airplane_sighting_hint,
+            Number(tutorialCfg.sighting_reach_radius || 3)
+          )
+        ) {
+          advanceTutorial(now);
+        } else if (
+          step === "landing_zone_medium" &&
+          reachedTutorialZone(false)
+        ) {
+          advanceTutorial(now);
+        } else if (
+          step === "landing_zone_high" &&
+          reachedTutorialZone(true)
+        ) {
+          advanceTutorial(now);
+        }
+        updateTutorialDemoCar(now);
+        updateTutorialArrow();
+      }
+
       function distanceToSegment(px, py, ax, ay, bx, by) {
         var dx = bx - ax;
         var dy = by - ay;
@@ -450,6 +877,7 @@
       }
 
       function checkRewardCollections(t, now) {
+        if (isTutorial) return;
         rewardEvents.forEach(function (event) {
           var eventId = String(event.id);
           if (pendingCollectionIds[eventId]) return;
@@ -486,27 +914,20 @@
 
       function createRewardMesh(event) {
         var group = new THREE.Group();
-        var radius = Math.max(4, Number(event.radius || cfg.coin_radius)) * WORLD_SCALE;
-        var disk = new THREE.Mesh(
-          new THREE.CylinderGeometry(radius, radius, 2.4, 48),
-          new THREE.MeshStandardMaterial({
+        var radius = Math.max(0.5, Number(event.radius || cfg.coin_radius)) * WORLD_SCALE;
+        var cylinderHeight = 18;
+        var rewardArea = new THREE.Mesh(
+          new THREE.CylinderGeometry(radius, radius, cylinderHeight, 48, 1, true),
+          new THREE.MeshBasicMaterial({
             color: 0xf4c430,
-            emissive: 0xa27400,
-            emissiveIntensity: 0.25,
             transparent: true,
-            opacity: 0.28,
+            opacity: 0.1,
             depthWrite: false,
+            side: THREE.DoubleSide,
           })
         );
-        disk.position.y = 1.2;
-        group.add(disk);
-        var coin = new THREE.Mesh(
-          new THREE.CylinderGeometry(6, 6, 2.4, 16),
-          new THREE.MeshStandardMaterial({ color: 0xffe566, emissive: 0xf4c430, emissiveIntensity: 0.4 })
-        );
-        coin.rotation.z = Math.PI / 2;
-        coin.position.y = 8;
-        group.add(coin);
+        rewardArea.position.y = cylinderHeight / 2;
+        group.add(rewardArea);
         if (event.line && event.line.length >= 2) {
           var points = event.line.map(function (point) {
             return new THREE.Vector3(
@@ -580,7 +1001,12 @@
         ground.position.set(worldSize / 2, 0, worldSize / 2);
         scene.add(ground);
 
-        var grid = new THREE.GridHelper(worldSize, 80, 0x7ea35f, 0x5d8a45);
+        var grid = new THREE.GridHelper(
+          worldSize,
+          GRID_DIVISIONS,
+          0x7ea35f,
+          0x5d8a45
+        );
         grid.position.set(worldSize / 2, 0.05, worldSize / 2);
         scene.add(grid);
 
@@ -591,6 +1017,18 @@
             scene.add(mesh);
           });
         }
+        if (isTutorial) {
+          tutorialArrow = new THREE.ArrowHelper(
+            new THREE.Vector3(1, 0, 0),
+            new THREE.Vector3(0, 18, 0),
+            70,
+            0xfff04a,
+            18,
+            10
+          );
+          tutorialArrow.visible = false;
+          scene.add(tutorialArrow);
+        }
 
         layoutRenderer();
       }
@@ -600,6 +1038,7 @@
           var event = mesh.userData;
           var eventId = String(event.id);
           var active = Number(event.start_ms) <= t && Number(event.end_ms) >= t;
+          if (isTutorial) active = currentTutorialStep() === "airdrop";
           mesh.visible = active && collectedCoinIds.indexOf(eventId) < 0;
         });
       }
@@ -609,6 +1048,13 @@
           var isOwn = id === participantId;
           var player = isOwn ? own : renderedPlayer(players[id], now);
           var mesh = ensureCarMesh(id, player, isOwn);
+          mesh.position.set(worldX(player.x), 0, worldZ(player.y));
+          mesh.rotation.y = -(player.heading || 0);
+          mesh.visible = true;
+        });
+        Object.keys(replayPlayers).forEach(function (id) {
+          var player = replayPlayers[id];
+          var mesh = ensureCarMesh(id, player, false);
           mesh.position.set(worldX(player.x), 0, worldZ(player.y));
           mesh.rotation.y = -(player.heading || 0);
           mesh.visible = true;
@@ -632,8 +1078,8 @@
       }
 
       function updateCameras() {
-        var follow = 22;
-        var height = 13;
+        var follow = 48;
+        var height = 24;
         var x = worldX(own.x);
         var z = worldZ(own.y);
         cameraOffset.set(
@@ -641,7 +1087,9 @@
           height,
           z - Math.sin(own.heading) * follow
         );
-        camera.position.lerp(cameraOffset, 0.22);
+        // Keep a fixed follow distance. Position interpolation made the camera
+        // lag farther behind as the car accelerated, which looked like zooming.
+        camera.position.copy(cameraOffset);
         lookTarget.set(x + Math.cos(own.heading) * 48, 2, z + Math.sin(own.heading) * 48);
         camera.lookAt(lookTarget);
       }
@@ -670,8 +1118,19 @@
       }
 
       function drawMapZones(t) {
+        var tutorialStep = currentTutorialStep();
+        if (
+          isTutorial &&
+          tutorialStep !== "landing_zone_medium" &&
+          tutorialStep !== "landing_zone_high"
+        ) return;
         warnings.forEach(function (zone) {
           if (Number(zone.eff_ms) > t || Number(zone.exp_ms) < t) return;
+          if (isTutorial) {
+            var isHighChance = String(zone.event || "").toLowerCase().indexOf("tornado") >= 0;
+            if (tutorialStep === "landing_zone_medium" && isHighChance) return;
+            if (tutorialStep === "landing_zone_high" && !isHighChance) return;
+          }
           (zone.polygons || []).forEach(function (polygon) {
             if (!polygon.length) return;
             overviewCtx.beginPath();
@@ -690,48 +1149,8 @@
         });
       }
 
-      function drawMapChaserTracks(t) {
-        var currentRawMs = rawTimeForGameTime(t);
-        var minRawMs = currentRawMs == null ? null : currentRawMs - chaserTrackVisibleMs;
-        chaserTracks.forEach(function (track, trackIndex) {
-          var visiblePoints = (track.points || []).filter(function (point) {
-            var rawMs = Number(point[3]);
-            if (Number(point[0]) > t) return false;
-            if (minRawMs == null || !Number.isFinite(rawMs)) return true;
-            return rawMs >= minRawMs && rawMs <= currentRawMs;
-          });
-          if (visiblePoints.length < 1) return;
-          var color = CHASER_TRACK_COLORS[trackIndex % CHASER_TRACK_COLORS.length];
-          overviewCtx.save();
-          if (visiblePoints.length >= 2) {
-            overviewCtx.beginPath();
-            visiblePoints.forEach(function (point, index) {
-              var screen = worldToMap(point[1], point[2]);
-              if (index === 0) overviewCtx.moveTo(screen.x, screen.y);
-              else overviewCtx.lineTo(screen.x, screen.y);
-            });
-            overviewCtx.strokeStyle = color;
-            overviewCtx.lineWidth = 2.5;
-            overviewCtx.globalAlpha = 0.78;
-            overviewCtx.stroke();
-          }
-          var lastPoint = visiblePoints[visiblePoints.length - 1];
-          var marker = worldToMap(lastPoint[1], lastPoint[2]);
-          if (isOnMap(marker, 8)) {
-            overviewCtx.globalAlpha = 1;
-            overviewCtx.beginPath();
-            overviewCtx.arc(marker.x, marker.y, 4, 0, Math.PI * 2);
-            overviewCtx.fillStyle = color;
-            overviewCtx.fill();
-            overviewCtx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-            overviewCtx.lineWidth = 1.5;
-            overviewCtx.stroke();
-          }
-          overviewCtx.restore();
-        });
-      }
-
       function drawMapPotential(t) {
+        if (isTutorial && currentTutorialStep() !== "airplane_sighting") return;
         advancePotential(t);
         var visiblePotential = activePotential.map(function (point) {
           return { point: point, screen: worldToMap(point[2], point[3]) };
@@ -758,6 +1177,7 @@
       }
 
       function drawMapRewards(t) {
+        if (isTutorial && currentTutorialStep() !== "airdrop") return;
         var scale = mapScreenScale();
         rewardEvents.forEach(function (event) {
           if (Number(event.start_ms) > t || Number(event.end_ms) < t) return;
@@ -809,19 +1229,126 @@
       function drawMapPlayers(now) {
         var ownScreen = worldToMap(own.x, own.y);
         drawHeadingCone(ownScreen, own.heading || 0);
-        Object.keys(players).forEach(function (id) {
+        var visiblePlayers = Object.assign({}, players, replayPlayers);
+        Object.keys(visiblePlayers).forEach(function (id) {
           var isOwn = id === participantId;
-          var player = isOwn ? own : renderedPlayer(players[id], now);
+          var isReplay = id.indexOf("replay:") === 0;
+          var player = isOwn
+            ? own
+            : (isReplay ? visiblePlayers[id] : renderedPlayer(visiblePlayers[id], now));
           var screen = worldToMap(player.x, player.y);
-          if (!isOnMap(screen, cfg.player_radius + 6)) return;
+          var markerRadius = isOwn
+            ? Number(cfg.player_radius) * 0.5
+            : Number(cfg.player_radius) * 0.75;
+          if (!isOnMap(screen, markerRadius + 6)) return;
+          overviewCtx.save();
+          overviewCtx.globalAlpha = 0.5;
           overviewCtx.beginPath();
-          overviewCtx.arc(screen.x, screen.y, cfg.player_radius, 0, Math.PI * 2);
+          overviewCtx.arc(screen.x, screen.y, markerRadius, 0, Math.PI * 2);
           overviewCtx.fillStyle = player.color || (isOwn ? "#1f77b4" : "#d62728");
           overviewCtx.fill();
           overviewCtx.lineWidth = isOwn ? 4 : 2;
           overviewCtx.strokeStyle = isOwn ? "#111827" : "#ffffff";
           overviewCtx.stroke();
+          overviewCtx.restore();
         });
+      }
+
+      function drawMapArrow(from, to, color) {
+        var dx = to.x - from.x;
+        var dy = to.y - from.y;
+        var distance = Math.hypot(dx, dy);
+        if (distance < 8) return false;
+        var ux = dx / distance;
+        var uy = dy / distance;
+        var startX = from.x + ux * 12;
+        var startY = from.y + uy * 12;
+        var endX = to.x - ux * 9;
+        var endY = to.y - uy * 9;
+        overviewCtx.save();
+        overviewCtx.strokeStyle = color;
+        overviewCtx.fillStyle = color;
+        overviewCtx.lineWidth = 3;
+        overviewCtx.lineCap = "round";
+        overviewCtx.beginPath();
+        overviewCtx.moveTo(startX, startY);
+        overviewCtx.lineTo(endX, endY);
+        overviewCtx.stroke();
+        overviewCtx.beginPath();
+        overviewCtx.moveTo(to.x, to.y);
+        overviewCtx.lineTo(
+          endX - uy * 6,
+          endY + ux * 6
+        );
+        overviewCtx.lineTo(
+          endX + uy * 6,
+          endY - ux * 6
+        );
+        overviewCtx.closePath();
+        overviewCtx.fill();
+        overviewCtx.restore();
+        return true;
+      }
+
+      function drawTutorialMapArrows() {
+        if (!isTutorial) return;
+        var step = currentTutorialStep();
+        var ownScreen = worldToMap(own.x, own.y);
+        var arrowCount = 0;
+        if (step === "airdrop") {
+          var reward = rewardEvents.find(function (event) {
+            return String(event.id) === String(tutorialCfg.reward_id);
+          });
+          if (reward) {
+            if (drawMapArrow(ownScreen, worldToMap(reward.x, reward.y), "#b07d00")) {
+              arrowCount += 1;
+            }
+          }
+        } else if (step === "airplane_sighting") {
+          var sightingHint = tutorialCfg.airplane_sighting_hint || {};
+          if (
+            drawMapArrow(
+              ownScreen,
+              worldToMap(sightingHint.x, sightingHint.y),
+              "#7c3aed"
+            )
+          ) {
+            arrowCount += 1;
+          }
+        } else if (step === "landing_zone_medium") {
+          var mediumHint = tutorialCfg.medium_zone_hint || {};
+          if (
+            drawMapArrow(
+              ownScreen,
+              worldToMap(mediumHint.x, mediumHint.y),
+              "#d97706"
+            )
+          ) {
+            arrowCount += 1;
+          }
+        } else if (step === "landing_zone_high") {
+          var highHint = tutorialCfg.high_zone_hint || {};
+          if (
+            drawMapArrow(
+              ownScreen,
+              worldToMap(highHint.x, highHint.y),
+              "#dc2626"
+            )
+          ) {
+            arrowCount += 1;
+          }
+        } else if (step === "other_car") {
+          var demoId = String((tutorialCfg.demo_car || {}).participant_id || "tutorial:other-car");
+          var demoPlayer = replayPlayers[demoId];
+          if (demoPlayer) {
+            if (drawMapArrow(ownScreen, worldToMap(demoPlayer.x, demoPlayer.y), "#dc2626")) {
+              arrowCount += 1;
+            }
+          }
+        }
+        if (overviewCanvas) {
+          overviewCanvas.dataset.tutorialArrowCount = String(arrowCount);
+        }
       }
 
       function drawOverview(t, now) {
@@ -832,10 +1359,10 @@
         if (!gameStarted) return;
         drawMapGrid();
         drawMapZones(t);
-        drawMapChaserTracks(t);
         drawMapPotential(t);
         drawMapRewards(t);
         drawMapPlayers(now);
+        drawTutorialMapArrows();
       }
 
       function renderFrame(t, now) {
@@ -852,7 +1379,12 @@
         integrateOwnPlayer(now);
         var t = isLobby ? 0 : gameTime(now);
         if (!isLobby) {
-          checkRewardCollections(t, now);
+          if (isTutorial) {
+            updateTutorial(now);
+          } else {
+            checkRewardCollections(t, now);
+            updateReplayPlayers(t, now);
+          }
           updateRewards(t);
         }
         updateCars(now);
@@ -861,7 +1393,7 @@
       }
 
       function sendPosition() {
-        if (!gameStarted) return;
+        if (!gameStarted || isTutorial) return;
         var now = performance.now();
         if (isLobby) {
           wsSend({
@@ -973,6 +1505,22 @@
         centerMapCameraOn(own);
       }
 
+      function handleOverviewZoomKey(code) {
+        if (!zoomSlider) return false;
+        var min = Number(zoomSlider.min);
+        var max = Number(zoomSlider.max);
+        var step = Number(zoomSlider.step) || 1;
+        viewportMiles = clamp(
+          viewportMiles + (code === "Digit1" ? step : -step),
+          min,
+          max
+        );
+        zoomSlider.value = String(viewportMiles);
+        updateZoomLabel();
+        centerMapCameraOn(own);
+        return true;
+      }
+
       function driveKeyForEvent(event) {
         if (driveKeys[event.key]) return event.key;
         if (driveKeys[event.code]) return event.code;
@@ -987,6 +1535,21 @@
 
       function handleKeyDown(event) {
         if (isTextInput(event.target)) return;
+        if (isTutorial && event.code === "Enter" && !event.repeat) {
+          var tutorialStep = currentTutorialStep();
+          if (tutorialStep === "other_car") {
+            event.preventDefault();
+            advanceTutorial(performance.now());
+            focusCanvas();
+            return;
+          }
+        }
+        if (event.code === "Digit1" || event.code === "Digit2") {
+          if (handleOverviewZoomKey(event.code)) {
+            event.preventDefault();
+            return;
+          }
+        }
         var key = driveKeyForEvent(event);
         if (!key) return;
         event.preventDefault();
@@ -1004,6 +1567,9 @@
       }
 
       setupScene();
+      updateTutorialCopy();
+      updateTutorialArrow();
+      if (isTutorial) centerMapCameraOn(own);
       updateCars(performance.now());
       updateCameras();
       renderFrame();
@@ -1013,6 +1579,9 @@
         updateZoomLabel();
         psynet.addPageEventListener(zoomSlider, "input", handleZoomChange);
       }
+      if (tutorialContinue) {
+        psynet.addPageEventListener(tutorialContinue, "click", handleTutorialContinue);
+      }
       psynet.addPageEventListener(canvas, "click", focusCanvas);
       psynet.addPageEventListener(window, "keydown", handleKeyDown, true);
       psynet.addPageEventListener(window, "keyup", handleKeyUp, true);
@@ -1021,7 +1590,9 @@
       focusCanvas();
 
       var unsubscribeHandlers = [];
-      if (isLobby) {
+      if (isTutorial) {
+        // Tutorial state is deliberately local: it neither joins nor mutates a live session.
+      } else if (isLobby) {
         unsubscribeHandlers.push(
           psynet.websocket.handle("lobby_position_update", function (msg) {
             if (msg.waiter_ids) syncWaiters(msg.waiter_ids);
@@ -1032,9 +1603,6 @@
         unsubscribeHandlers.push(
           psynet.session.onFreshState(applySnapshot),
           psynet.session.onEnd(submitFinalAnswer),
-          psynet.websocket.handle("position_update", function (msg) {
-            applyPosition(msg.player);
-          }),
           psynet.websocket.handle("coin_collected", function (msg) {
             applyCollection(msg);
           }),
@@ -1042,6 +1610,13 @@
             handleCollectRejected(msg);
           })
         );
+        if (usesLivePeers) {
+          unsubscribeHandlers.push(
+            psynet.websocket.handle("position_update", function (msg) {
+              applyPosition(msg.player);
+            })
+          );
+        }
         psynet.session.ready();
       }
 
@@ -1054,8 +1629,8 @@
         drawHandle = window.requestAnimationFrame(loop);
       }
       drawHandle = window.requestAnimationFrame(loop);
-      sendInterval = setInterval(sendPosition, cfg.send_interval_ms);
-      completionInterval = isLobby ? null : setInterval(function () {
+      sendInterval = isTutorial ? null : setInterval(sendPosition, cfg.send_interval_ms);
+      completionInterval = (isLobby || isTutorial) ? null : setInterval(function () {
         if (gameEndsAt != null && performance.now() >= gameEndsAt) submitFinalAnswer();
       }, 200);
       pollInterval = isLobby ? setInterval(pollLobbyRelease, 1000) : null;

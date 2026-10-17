@@ -2,7 +2,8 @@
 
 export function activate({ vars, psynet }) {
   const config = vars.canvas_config;
-  if (config.mode !== "lobby" && !config.world_url) {
+  const startsImmediately = config.mode === "lobby" || config.mode === "tutorial";
+  if (!startsImmediately && !config.world_url) {
     throw new Error("Missing world map URL.");
   }
   const worldPromise = config.world_url
@@ -19,9 +20,11 @@ export function activate({ vars, psynet }) {
       return;
     }
     Object.assign(config, world);
-    const trackCount = Number(config.storm_chaser_track_count || 8);
+    const trackCount = Number(config.storm_chaser_track_count || 16);
     if (Array.isArray(config.chaser_tracks)) {
-      config.chaser_tracks = config.chaser_tracks.slice(0, trackCount);
+      config.chaser_tracks = config.experiment_condition === "social"
+        ? config.chaser_tracks.slice(0, trackCount)
+        : [];
     }
   }
 
@@ -34,7 +37,7 @@ export function activate({ vars, psynet }) {
     });
   }
 
-  if (config.mode === "lobby") {
+  if (startsImmediately) {
     start();
     return;
   }

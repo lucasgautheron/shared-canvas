@@ -50,25 +50,38 @@ else:
     )
 
 
+EXPERIMENT_CONDITIONS = {"asocial", "social", "live"}
+EXPERIMENT_CONDITION = "social"
+if EXPERIMENT_CONDITION not in EXPERIMENT_CONDITIONS:
+    raise ValueError(
+        f"EXPERIMENT_CONDITION must be one of {sorted(EXPERIMENT_CONDITIONS)}, "
+        f"not {EXPERIMENT_CONDITION!r}."
+    )
+
 GROUP_TYPE = "shared_canvas_group"
 GROUPER_ID = f"{GROUP_TYPE}_grouper"
-GROUP_SIZE = 2
+LIVE_GROUP_SIZE = 2
+GROUP_SIZE = LIVE_GROUP_SIZE if EXPERIMENT_CONDITION == "live" else 1
 CANVAS_SIZE = 640
 CANVAS_RENDER_WIDTH = 960
 CANVAS_RENDER_HEIGHT = 540
-TRIAL_SECONDS = 90
+TRIAL_SECONDS = 5 * 60
+SESSION_TRIALS_PER_PARTICIPANT = 4
 SEND_INTERVAL_MS = 100
 DRAW_INTERVAL_MS = 25
 PLAYER_RADIUS = 12
 COIN_RADIUS = 10
 COIN_BONUS = 0.10
-STORM_CHASER_TRACK_COUNT = 8
+STORM_CHASER_TRACK_COUNT = 16
 CHASER_TRACK_VISIBLE_MS = 30 * 60 * 1000
 POSITION_EVENT = "position"
 COLLECT_EVENT = "collect"
 LOBBY_POSITION_EVENT = "lobby_position"
 LOBBY_PAGE_LABEL = "canvas_lobby"
 LOBBY_MAX_PLAYER_SPEED = 80
+TUTORIAL_PAGE_LABEL = "guided_driving_tutorial"
+TUTORIAL_MAX_PLAYER_SPEED = 1.5
+TUTORIAL_MOVEMENT_THRESHOLD = 1.5
 STATIC_SESSION_ROOT = os.path.join(os.path.dirname(__file__), "static")
 COLLECTION_TIME_GRACE_MS = 750
 
@@ -95,6 +108,13 @@ def get_world_nodes():
         coin_bonus=COIN_BONUS,
         include_browser_layers=False,
     )
+    unique_world_ids = {world["world_id"] for world in worlds}
+    if len(unique_world_ids) < SESSION_TRIALS_PER_PARTICIPANT:
+        raise RuntimeError(
+            "Four-session experiments require at least "
+            f"{SESSION_TRIALS_PER_PARTICIPANT} distinct session worlds, "
+            f"but only {len(unique_world_ids)} were found."
+        )
     return [
         StaticNode(
             definition=node_definition_from_world(world),
@@ -128,6 +148,49 @@ def lobby_spawn_for_participant(participant_id: int) -> dict:
         "vx": 0.0,
         "vy": 0.0,
         "heading": 0.0,
+    }
+
+
+def tutorial_steps(condition: str = EXPERIMENT_CONDITION) -> list[str]:
+    """Return the tutorial steps enabled for the selected condition."""
+
+    steps = [
+        "movement",
+        "airdrop",
+        "airplane_sighting",
+        "landing_zone_medium",
+        "landing_zone_high",
+    ]
+    if condition in {"social", "live"}:
+        steps.append("other_car")
+    return steps
+
+
+def tutorial_player(participant_id: int) -> dict:
+    """Create the deterministic player used in the solo driving tutorial."""
+
+    return {
+        "participant_id": str(participant_id),
+        "label": "Your car",
+        "color": PLAYER_COLORS[0],
+        "x": 300.0,
+        "y": 320.0,
+        "vx": 0.0,
+        "vy": 0.0,
+        "heading": 0.0,
+    }
+
+
+def tutorial_answer(participant_id: int) -> dict:
+    """Return the structured tutorial answer used by PsyNet bots."""
+
+    steps = tutorial_steps()
+    return {
+        "completed_tutorial": True,
+        "experiment_condition": EXPERIMENT_CONDITION,
+        "participant_id": int(participant_id),
+        "completed_steps": steps,
+        "step_elapsed_ms": {step: 0 for step in steps},
     }
 
 
@@ -228,6 +291,7 @@ class CanvasGameState(LiveSession):
         return {
             "params": {
                 "participant_ids": ordered_ids,
+                "experiment_condition": EXPERIMENT_CONDITION,
                 "world": public_world_payload(world),
                 "trial_seconds": TRIAL_SECONDS,
                 "send_interval_ms": SEND_INTERVAL_MS,
@@ -406,6 +470,7 @@ class CanvasGameState(LiveSession):
                 (self.collection_counts or {}).get(participant_id_str, 0)
             ),
             "final_position": final_position,
+            "experiment_condition": EXPERIMENT_CONDITION,
             "world_id": world.get("world_id"),
             "session_label": world.get("session_label"),
         }
@@ -602,20 +667,34 @@ def advance_past_lobby_pages(bots: List[BotDriver], max_iterations=20):
 def instruction_page():
     content = tags.div()
     with content:
-        tags.h2("Shared canvas navigation")
-        tags.p(
-            "You will drive a car across a live storm map with other "
-            "participants. Use the arrow keys or WASD to accelerate, brake, "
-            "and steer."
-        )
+        tags.h2("Airdrop navigation")
+        if EXPERIMENT_CONDITION == "live":
+            tags.p(
+                "You will search for airdrops in a live driving area with another "
+                "participant. Use the arrow keys or WASD to accelerate, brake, "
+                "and steer."
+            )
+        elif EXPERIMENT_CONDITION == "social":
+            tags.p(
+                "You will search for airdrops by yourself. Cars following "
+                "recorded routes from earlier sessions will also move through "
+                "the area. Use the arrow keys or WASD to accelerate, brake, and "
+                "steer."
+            )
+        else:
+            tags.p(
+                "You will search for airdrops by yourself. No other "
+                "drivers will be visible. Use the arrow keys or WASD to "
+                "accelerate, brake, and steer."
+            )
         tags.p(
             "A map in the upper right shows the wider area around your car. "
-            "Use it to spot storm columns, warning zones, and other drivers."
+            "Use airplane sightings and potential landing zones to decide "
+            "where to search."
         )
         tags.p(
-            "Coins appear in places that are worth exploring. Drive through "
-            "promising areas at the right time. Each coin you find adds $0.10 "
-            "to your bonus."
+            "Airdrops appear in promising places at particular times. Each "
+            "airdrop you collect adds $0.10 to your bonus."
         )
     return InfoPage(content, time_estimate=20)
 
@@ -644,6 +723,111 @@ class SharedCanvasAssets:
         return {"canvas_config": self.canvas_config}
 
 
+class TutorialControl(SharedCanvasAssets, Control):
+    """Deterministic solo tutorial using the production driving renderer."""
+
+    external_template = "shared_canvas.html"
+    macro = "shared_canvas_control"
+
+    def __init__(self, participant):
+        self.participant = participant
+        super().__init__(show_next_button=False)
+
+    @property
+    def canvas_config(self):
+        participant_id = int(self.participant.id)
+        player = tutorial_player(participant_id)
+        reward = {
+            "id": "tutorial-reward",
+            "start_ms": 0,
+            "end_ms": 10 * 60 * 1000,
+            "x": 308,
+            "y": 320,
+            "radius": 2.5,
+            "line": [],
+        }
+        return {
+            "mode": "tutorial",
+            "experiment_condition": EXPERIMENT_CONDITION,
+            "role": player["label"],
+            "participant_id": participant_id,
+            "canvas_size": CANVAS_SIZE,
+            "canvas_width": CANVAS_RENDER_WIDTH,
+            "canvas_height": CANVAS_RENDER_HEIGHT,
+            "trial_seconds": 10 * 60,
+            "send_interval_ms": SEND_INTERVAL_MS,
+            "draw_interval_ms": DRAW_INTERVAL_MS,
+            "player_radius": PLAYER_RADIUS,
+            "initial_players": {str(participant_id): player},
+            "initial_player": player,
+            "coin_radius": reward["radius"],
+            "coin_bonus": 0.0,
+            "max_player_speed": TUTORIAL_MAX_PLAYER_SPEED,
+            "speed_limit_mph": 60,
+            "projection": {"px_per_mile": 1},
+            "storm_points": [[0, 10 * 60 * 1000, 320, 320, 75, 80, 0]],
+            "warnings": [
+                {
+                    "event": "Severe Thunderstorm Warning",
+                    "eff_ms": 0,
+                    "exp_ms": 10 * 60 * 1000,
+                    "polygons": [
+                        [[330, 314], [342, 314], [342, 326], [330, 326]]
+                    ],
+                },
+                {
+                    "event": "Tornado Warning",
+                    "eff_ms": 0,
+                    "exp_ms": 10 * 60 * 1000,
+                    "polygons": [
+                        [[346, 314], [358, 314], [358, 326], [346, 326]]
+                    ],
+                },
+            ],
+            "reward_events": [reward],
+            "chaser_tracks": [],
+            "timing": {
+                "game_start_ms": 0,
+                "game_end_ms": 10 * 60 * 1000,
+            },
+            "tutorial": {
+                "steps": tutorial_steps(),
+                "movement_threshold": TUTORIAL_MOVEMENT_THRESHOLD,
+                "reward_id": reward["id"],
+                "sighting_reach_radius": 3.0,
+                "airplane_sighting_hint": {"x": 320, "y": 320},
+                "medium_zone_hint": {"x": 336, "y": 320},
+                "high_zone_hint": {"x": 352, "y": 320},
+                "demo_car": {
+                    "participant_id": "tutorial:other-car",
+                    "label": "Another driver",
+                    "color": PLAYER_COLORS[1],
+                    "orbit_radius": 3.5,
+                    "orbit_seconds": 8,
+                },
+            },
+        }
+
+    def format_answer(self, raw_answer, **kwargs):
+        return raw_answer
+
+    def get_bot_response(self, experiment, bot, page, prompt):
+        return tutorial_answer(bot.id)
+
+
+def tutorial_page(participant: Participant):
+    """Show the condition-aware guided driving tutorial."""
+
+    return ModularPage(
+        TUTORIAL_PAGE_LABEL,
+        "",
+        TutorialControl(participant),
+        save_answer="guided_driving_tutorial",
+        time_estimate=90,
+        requires_full_page_reload=True,
+    )
+
+
 class LobbyControl(SharedCanvasAssets, Control):
     """Pre-group 3D wait room with no LiveSession or saved answers."""
 
@@ -660,6 +844,7 @@ class LobbyControl(SharedCanvasAssets, Control):
         initial_player = lobby_spawn_for_participant(participant_id)
         return {
             "mode": "lobby",
+            "experiment_condition": EXPERIMENT_CONDITION,
             "role": initial_player["label"],
             "participant_id": participant_id,
             "canvas_size": CANVAS_SIZE,
@@ -704,6 +889,7 @@ class SharedCanvasControl(SharedCanvasAssets, LiveSessionControl):
         participant_id = int(self.participant.id)
         role_index = participant_ids.index(participant_id)
         return {
+            "experiment_condition": EXPERIMENT_CONDITION,
             "role": f"Player {role_index + 1}",
             "participant_id": participant_id,
             "world_id": world["world_id"],
@@ -767,7 +953,7 @@ class SharedCanvasTrial(StaticTrial):
         with prompt:
             tags.p(
                 "Drive with the arrow keys or WASD. Use the upper-right map "
-                "to find coins before the session ends."
+                "to find airdrops before the session ends."
             )
         return ModularPage(
             "shared_canvas",
@@ -810,6 +996,7 @@ class SharedCanvasTrial(StaticTrial):
                 return result
         return {
             "completed_live_canvas": False,
+            "experiment_condition": EXPERIMENT_CONDITION,
             "world_id": self.definition["world_id"],
             "coin_bonus": 0.0,
             "raw_answer": raw_answer,
@@ -832,17 +1019,19 @@ class SharedCanvasTrial(StaticTrial):
         content = tags.div()
         with content:
             tags.h2("Navigation complete")
-            tags.p(f"Your coin bonus is ${bonus:.2f}.")
-            tags.p("Thank you for exploring the shared map.")
+            tags.p(f"Your airdrop bonus is ${bonus:.2f}.")
+            tags.p("Thank you for completing the airdrop search.")
         return InfoPage(content, time_estimate=5)
 
 
 class Exp(psynet.experiment.Experiment):
-    label = "Real-time shared canvas navigation"
+    label = "Airdrop navigation"
     variables_initial_values = {
+        "experiment_condition": EXPERIMENT_CONDITION,
         "group_size": GROUP_SIZE,
         "canvas_size": CANVAS_SIZE,
         "trial_seconds": TRIAL_SECONDS,
+        "session_trials_per_participant": SESSION_TRIALS_PER_PARTICIPANT,
         "send_interval_ms": SEND_INTERVAL_MS,
         "draw_interval_ms": DRAW_INTERVAL_MS,
         "coin_bonus": COIN_BONUS,
@@ -857,6 +1046,7 @@ class Exp(psynet.experiment.Experiment):
 
     timeline = Timeline(
         NoConsent(),
+        PageMaker(tutorial_page, time_estimate=90),
         SimpleGrouper(
             group_type=GROUP_TYPE,
             initial_group_size=GROUP_SIZE,
@@ -869,8 +1059,9 @@ class Exp(psynet.experiment.Experiment):
             id_="shared_canvas_worlds",
             trial_class=SharedCanvasTrial,
             nodes=get_world_nodes,
-            expected_trials_per_participant=1,
-            max_trials_per_participant=1,
+            expected_trials_per_participant=SESSION_TRIALS_PER_PARTICIPANT,
+            max_trials_per_participant=SESSION_TRIALS_PER_PARTICIPANT,
+            allow_repeated_nodes=False,
             sync_group_type=GROUP_TYPE,
             check_performance_at_end=False,
         ),
@@ -897,38 +1088,74 @@ class Exp(psynet.experiment.Experiment):
         return success_response(waiting=waiting, waiter_count=len(waiters))
 
     def test_serial_run_bots(self, bots: List[BotDriver]):
+        assert tutorial_steps("asocial") == [
+            "movement",
+            "airdrop",
+            "airplane_sighting",
+            "landing_zone_medium",
+            "landing_zone_high",
+        ]
+        assert tutorial_steps("social")[-1] == "other_car"
+        assert tutorial_steps("live")[-1] == "other_car"
+
+        for bot in bots:
+            assert bot.current_page_label == TUTORIAL_PAGE_LABEL
+            bot.take_page(response=tutorial_answer(bot.id))
+
+        for bot in bots:
+            participant = Participant.query.get(bot.id)
+            answer = participant.var.guided_driving_tutorial
+            assert answer["completed_tutorial"] is True
+            assert answer["experiment_condition"] == EXPERIMENT_CONDITION
+            assert answer["completed_steps"] == tutorial_steps()
+
         advance_past_lobby_pages(bots)
         advance_past_wait_pages(bots)
 
-        for bot in bots:
-            assert "Shared canvas navigation" in bot.current_page_text
-            assert "Each coin you find adds $0.10" in bot.current_page_text
-            bot.take_page()
+        world_ids_by_participant = {bot.id: [] for bot in bots}
+        for trial_index in range(SESSION_TRIALS_PER_PARTICIPANT):
+            for bot in bots:
+                assert "Airdrop navigation" in bot.current_page_text
+                assert "Each airdrop you collect adds $0.10" in bot.current_page_text
+                bot.take_page()
 
-        advance_past_wait_pages(bots)
+            advance_past_wait_pages(bots)
 
-        for bot in bots:
-            assert bot.current_page_label == "shared_canvas"
-            bot.take_page(response=build_bot_answer(bot))
+            for bot in bots:
+                assert bot.current_page_label == "shared_canvas"
+                bot.take_page(response=build_bot_answer(bot))
 
-        advance_past_wait_pages(bots)
+            advance_past_wait_pages(bots)
 
-        answers_by_group = {}
-        for bot in bots:
-            assert "Navigation complete" in bot.current_page_text
-            answer = bot.current_trial.answer
-            assert isinstance(answer, dict)
-            assert answer["completed_live_canvas"] is True
-            assert answer["coin_bonus"] == 0.0
-            assert answer["collected_coin_ids"] == []
-            assert answer["collected_public_coin_ids"] == []
-            assert answer["participant_id"] == bot.id
-            participant = Participant.query.get(bot.id)
-            group_id = int(participant.active_sync_groups[GROUP_TYPE].id)
-            answers_by_group.setdefault(group_id, []).append(answer)
+            answers_by_group = {}
+            for bot in bots:
+                assert "Navigation complete" in bot.current_page_text
+                answer = bot.current_trial.answer
+                assert isinstance(answer, dict)
+                assert answer["completed_live_canvas"] is True
+                assert answer["experiment_condition"] == EXPERIMENT_CONDITION
+                assert answer["coin_bonus"] == 0.0
+                assert answer["collected_coin_ids"] == []
+                assert answer["collected_public_coin_ids"] == []
+                assert answer["participant_id"] == bot.id
+                world_ids_by_participant[bot.id].append(answer["world_id"])
+                participant = Participant.query.get(bot.id)
+                group_id = int(participant.active_sync_groups[GROUP_TYPE].id)
+                answers_by_group.setdefault(group_id, []).append(answer)
 
-        assert len(answers_by_group) == len(bots) // GROUP_SIZE
+            assert len(answers_by_group) == len(bots) // GROUP_SIZE
+            assert all(
+                len(group_answers) == GROUP_SIZE
+                for group_answers in answers_by_group.values()
+            )
+
+            if trial_index < SESSION_TRIALS_PER_PARTICIPANT - 1:
+                for bot in bots:
+                    bot.take_page()
+                advance_past_wait_pages(bots)
+
         assert all(
-            len(group_answers) == GROUP_SIZE
-            for group_answers in answers_by_group.values()
+            len(world_ids) == SESSION_TRIALS_PER_PARTICIPANT
+            and len(set(world_ids)) == SESSION_TRIALS_PER_PARTICIPANT
+            for world_ids in world_ids_by_participant.values()
         )
