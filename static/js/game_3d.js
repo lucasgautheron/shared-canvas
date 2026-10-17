@@ -16,8 +16,13 @@
   var OVERVIEW_HEIGHT_RATIO = 0.54;
   var BORDER_MARGIN_MILES = 25;
   var REWARD_CYLINDER_HEIGHT = 42;
+  var REWARD_MAP_PULSE_DURATION_MS = 4000;
+  var REWARD_MAP_PULSE_PERIOD_MS = 1000;
+  var REWARD_MAP_PULSE_RADIUS_MULTIPLIER = 4;
   var COIN_SOUND_DURATION_MS = 3981;
   var COIN_SOUND_URL = "/static/coin_fall.wav";
+  var TUTORIAL_ARROW_BOB_PERIOD_MS = 1600;
+  var TUTORIAL_ARROW_BOB_WORLD_AMPLITUDE = 4;
   var CHASER_TRACK_COLORS = ["#2563eb", "#7c3aed", "#0891b2", "#db2777", "#059669", "#ea580c"];
 
   function clamp(value, low, high) {
@@ -200,6 +205,7 @@
       var zoomSlider = document.getElementById("zoom-slider");
       var zoomLabel = document.getElementById("zoom-label");
       var bonusPill = document.querySelector(".bonus-pill");
+      var gameTimeLeft = document.getElementById("game-time-left");
       var canvasWidth = Number(cfg.canvas_width || 960);
       var canvasHeight = Number(cfg.canvas_height || 540);
       var canvasSize = Number(cfg.canvas_size || 640);
@@ -220,7 +226,8 @@
       var timing = cfg.timing || {};
       var tutorialCfg = cfg.tutorial || {};
       var tutorial = null;
-      var tutorialStartPosition = null;
+      var tutorialLastMovementPosition = null;
+      var tutorialMovementDistance = 0;
       var tutorialArrow = null;
       var serverStartedAt = null;
       var gameEndsAt = null;
@@ -255,7 +262,7 @@
       );
       own.heading = headingFromVelocity(own.vx, own.vy, 0);
       own.speed = Math.hypot(Number(own.vx) || 0, Number(own.vy) || 0);
-      tutorialStartPosition = { x: own.x, y: own.y };
+      tutorialLastMovementPosition = { x: own.x, y: own.y };
       var bonus = 0;
       var displayedBonus = 0;
       var bonusAnimationTimer = null;
@@ -294,18 +301,19 @@
       players[participantId] = Object.assign({}, own);
 
       if (isTutorial) {
-        tutorialStartPosition = { x: own.x, y: own.y };
         if (!root.GameTutorial) {
           throw new Error("Tutorial controller failed to load.");
         }
         tutorial = root.GameTutorial.create({
+          bonus: cfg.coin_bonus,
           canvas: canvas,
           condition: experimentCondition,
           config: tutorialCfg,
           onComplete: submitTutorialAnswer,
           onFocusChange: updateTutorialSceneFocus,
-          onStepChanged: function (_step, now) {
-            tutorialStartPosition = { x: own.x, y: own.y };
+          onStepChanged: function (step, now) {
+            tutorialLastMovementPosition = { x: own.x, y: own.y };
+            tutorialMovementDistance = 0;
             own.speed = 0;
             own.vx = 0;
             own.vy = 0;
@@ -314,6 +322,7 @@
             players[participantId] = Object.assign({}, own);
             keys = {};
             lastDrawAt = now;
+            placeTutorialTarget(step);
           },
         });
       }
@@ -391,6 +400,24 @@
         }
       }
 
+      function setVertexColorsWhiteWhenMuted(object, muted) {
+        if (!object.userData.tutorialWhiteWhenMuted || !object.geometry) return;
+        var colorAttribute = object.geometry.getAttribute("color");
+        if (!colorAttribute) return;
+        if (!object.userData.tutorialOriginalVertexColors) {
+          object.userData.tutorialOriginalVertexColors =
+            colorAttribute.array.slice();
+        }
+        if (muted) {
+          colorAttribute.array.fill(1);
+        } else {
+          colorAttribute.array.set(
+            object.userData.tutorialOriginalVertexColors
+          );
+        }
+        colorAttribute.needsUpdate = true;
+      }
+
       function updateTutorialSceneFocus(step, observing) {
         if (!scene) return;
         canvas.dataset.tutorialFocus = observing ? String(step) : "none";
@@ -403,6 +430,7 @@
         tutorialFocusStep = step;
         tutorialFocusObserving = observing;
         scene.traverse(function (object) {
+          setVertexColorsWhiteWhenMuted(object, observing);
           if (!object.material) return;
           var cue = tutorialCueForObject(object);
           var keepColor =
@@ -446,9 +474,143 @@
         tutorial.advance(now);
       }
 
+      function tutorialTargetFromCurrentPosition(distance) {
+        var margin = Math.max(20, Number(cfg.player_radius || 12));
+        var heading = Number.isFinite(own.heading) ? own.heading : 0;
+        var directions = [
+          heading,
+          heading + Math.PI / 2,
+          heading - Math.PI / 2,
+          heading + Math.PI,
+        ];
+        for (var i = 0; i < directions.length; i++) {
+          var candidate = {
+            x: own.x + Math.cos(directions[i]) * distance,
+            y: own.y + Math.sin(directions[i]) * distance,
+          };
+          if (
+            candidate.x >= margin &&
+            candidate.x <= canvasSize - margin &&
+            candidate.y >= margin &&
+            candidate.y <= canvasSize - margin
+          ) {
+            return candidate;
+          }
+        }
+        return {
+          x: clamp(
+            own.x + Math.cos(heading) * distance,
+            margin,
+            canvasSize - margin
+          ),
+          y: clamp(
+            own.y + Math.sin(heading) * distance,
+            margin,
+            canvasSize - margin
+          ),
+        };
+      }
+
+      function moveTutorialReward(target) {
+        var reward = rewardEvents.find(function (event) {
+          return String(event.id) === String(tutorialCfg.reward_id);
+        });
+        if (!reward) return;
+        reward.x = target.x;
+        reward.y = target.y;
+        rewardMeshes.forEach(function (mesh) {
+          if (String(mesh.userData.id) !== String(reward.id)) return;
+          mesh.userData.x = target.x;
+          mesh.userData.y = target.y;
+          mesh.position.set(worldX(target.x), 0, worldZ(target.y));
+        });
+      }
+
+      function moveTutorialSighting(target) {
+        tutorialCfg.airplane_sighting_hint =
+          Object.assign(tutorialCfg.airplane_sighting_hint || {}, target);
+        if (stormPoints.length) {
+          stormPoints[0][2] = target.x;
+          stormPoints[0][3] = target.y;
+        }
+      }
+
+      function moveTutorialZone(target, highPriority) {
+        var cue = highPriority
+          ? "landing_zone_high"
+          : "landing_zone_medium";
+        var zone = warnings.find(function (warning) {
+          return zoneIsHighPriority(warning) === highPriority;
+        });
+        if (!zone || !(zone.polygons || []).length) return;
+        var polygon = zone.polygons[0];
+        var center = polygon.reduce(function (sum, point) {
+          return {
+            x: sum.x + Number(point[0]) / polygon.length,
+            y: sum.y + Number(point[1]) / polygon.length,
+          };
+        }, { x: 0, y: 0 });
+        var dx = target.x - center.x;
+        var dy = target.y - center.y;
+        polygon.forEach(function (point) {
+          point[0] = Number(point[0]) + dx;
+          point[1] = Number(point[1]) + dy;
+        });
+        zoneMeshes.forEach(function (mesh) {
+          if (mesh.userData.tutorialCue !== cue) return;
+          var originalCenter = mesh.userData.tutorialOriginalCenter;
+          mesh.position.set(
+            worldX(target.x - originalCenter.x),
+            0,
+            worldZ(target.y - originalCenter.y)
+          );
+        });
+        var hintKey = highPriority
+          ? "high_zone_hint"
+          : "medium_zone_hint";
+        tutorialCfg[hintKey] = Object.assign(
+          tutorialCfg[hintKey] || {},
+          target
+        );
+      }
+
+      function placeTutorialTarget(step) {
+        if (step === "airdrop") {
+          moveTutorialReward(tutorialTargetFromCurrentPosition(
+            Number(tutorialCfg.reward_target_distance || 8)
+          ));
+        } else if (step === "airplane_sighting") {
+          moveTutorialSighting(tutorialTargetFromCurrentPosition(
+            Number(tutorialCfg.sighting_target_distance || 12)
+          ));
+        } else if (step === "landing_zone_medium") {
+          moveTutorialZone(tutorialTargetFromCurrentPosition(
+            Number(tutorialCfg.zone_target_distance || 14)
+          ), false);
+        } else if (step === "landing_zone_high") {
+          moveTutorialZone(tutorialTargetFromCurrentPosition(
+            Number(tutorialCfg.zone_target_distance || 14)
+          ), true);
+        }
+      }
+
       function gameTime(now) {
         if (serverStartedAt == null) return 0;
         return Math.min(cfg.trial_seconds * 1000, Math.max(0, now - serverStartedAt));
+      }
+
+      function updateCountdown(now) {
+        if (!gameTimeLeft || isTutorial) return;
+        var remainingSeconds = gameEndsAt == null
+          ? Math.max(0, Math.ceil(Number(cfg.trial_seconds || 0)))
+          : Math.max(0, Math.ceil((gameEndsAt - now) / 1000));
+        var minutes = Math.floor(remainingSeconds / 60);
+        var seconds = remainingSeconds % 60;
+        gameTimeLeft.textContent =
+          String(minutes).padStart(2, "0") +
+          ":" +
+          String(seconds).padStart(2, "0");
+        gameTimeLeft.dateTime = "PT" + String(remainingSeconds) + "S";
       }
 
       function updateWaitingOverlay(readyIds) {
@@ -607,7 +769,7 @@
         renderBonus(nextCents / 100);
       }
 
-      function animateBonus(value) {
+      function animateBonus(value, onComplete) {
         var nextBonus = Number(value || 0);
         var currentCents = Math.round(displayedBonus * 100);
         var targetCents = Math.round(nextBonus * 100);
@@ -616,6 +778,7 @@
         bonusAnimationTargetCents = targetCents;
         if (targetCents <= currentCents) {
           renderBonus(targetCents / 100);
+          if (onComplete) onComplete();
           return;
         }
         if (bonusPill) bonusPill.classList.add("reward-collecting");
@@ -635,6 +798,7 @@
           } else {
             bonusAnimationTimer = null;
             if (bonusPill) bonusPill.classList.remove("reward-collecting");
+            if (onComplete) onComplete();
           }
         }
         bonusAnimationTimer = setTimeout(incrementDisplayedBonus, stepDelay);
@@ -881,6 +1045,15 @@
             return String(event.id) === String(tutorialCfg.reward_id);
           }) || null;
         }
+        if (step === "airplane_sighting") {
+          return tutorialCfg.airplane_sighting_hint || null;
+        }
+        if (step === "landing_zone_medium") {
+          return tutorialCfg.medium_zone_hint || null;
+        }
+        if (step === "landing_zone_high") {
+          return tutorialCfg.high_zone_hint || null;
+        }
         if (step === "other_car") {
           var demoId = String((tutorialCfg.demo_car || {}).participant_id || "tutorial:other-car");
           return replayPlayers[demoId] || null;
@@ -888,7 +1061,12 @@
         return null;
       }
 
-      function updateTutorialArrow() {
+      function tutorialArrowBob(now, amplitude) {
+        var omega = Math.PI * 2 / TUTORIAL_ARROW_BOB_PERIOD_MS;
+        return Math.sin(omega * now) * amplitude;
+      }
+
+      function updateTutorialArrow(now) {
         if (!tutorialArrow) return;
         var target = tutorialArrowTarget();
         if (!target) {
@@ -898,12 +1076,20 @@
         }
         var targetHeight =
           currentTutorialStep() === "other_car" ? CAR_ARROW_TARGET_HEIGHT : 4;
+        var verticalShift = tutorialArrowBob(
+          now == null ? performance.now() : now,
+          TUTORIAL_ARROW_BOB_WORLD_AMPLITUDE
+        );
         var targetVector = new THREE.Vector3(
           worldX(target.x),
-          targetHeight,
+          targetHeight + verticalShift,
           worldZ(target.y)
         );
-        var origin = new THREE.Vector3(targetVector.x, 64, targetVector.z);
+        var origin = new THREE.Vector3(
+          targetVector.x,
+          64 + verticalShift,
+          targetVector.z
+        );
         var direction = targetVector.clone().sub(origin);
         var distance = direction.length();
         if (distance < 0.001) {
@@ -957,18 +1143,27 @@
         var step = currentTutorialStep();
         var tutorialAction = tutorial.update(now);
         updateTutorialDemoCar(now);
-        updateTutorialArrow();
+        updateTutorialArrow(now);
         if (tutorialAction === "advance") {
           advanceTutorial(now);
           return;
         }
         if (isTutorialObserving(now)) return;
         if (step === "movement") {
-          var distanceMoved = Math.hypot(
-            own.x - tutorialStartPosition.x,
-            own.y - tutorialStartPosition.y
+          tutorialMovementDistance += Math.hypot(
+            own.x - tutorialLastMovementPosition.x,
+            own.y - tutorialLastMovementPosition.y
           );
-          if (distanceMoved >= Number(tutorialCfg.movement_threshold || 1.5)) {
+          tutorialLastMovementPosition = { x: own.x, y: own.y };
+          var movementPracticeElapsed =
+            tutorial.elapsed(now) -
+            Number(tutorialCfg.intro_duration_ms || 10000);
+          if (
+            movementPracticeElapsed >=
+              Number(tutorialCfg.movement_min_duration_ms || 5000) &&
+            tutorialMovementDistance >=
+              Number(tutorialCfg.movement_threshold || 1.5)
+          ) {
             advanceTutorial(now);
           }
         } else if (step === "airdrop") {
@@ -977,10 +1172,14 @@
           });
           if (
             reward &&
+            collectedCoinIds.indexOf(String(reward.id)) < 0 &&
             distanceToRewardEvent(reward) <= Number(reward.radius || cfg.coin_radius)
           ) {
             collectedCoinIds.push(String(reward.id));
-            advanceTutorial(now);
+            playCoinFallSound();
+            animateBonus(Number(cfg.coin_bonus || 0), function () {
+              advanceTutorial(performance.now());
+            });
           }
         } else if (
           step === "airplane_sighting" &&
@@ -1083,10 +1282,17 @@
         });
         shape.closePath();
 
+        var polygonCenter = polygon.reduce(function (sum, point) {
+          return {
+            x: sum.x + Number(point[0]) / polygon.length,
+            y: sum.y + Number(point[1]) / polygon.length,
+          };
+        }, { x: 0, y: 0 });
         var group = new THREE.Group();
         group.userData = {
           zone: zone,
           tutorialCue: cue,
+          tutorialOriginalCenter: polygonCenter,
         };
         var fill = new THREE.Mesh(
           new THREE.ShapeGeometry(shape),
@@ -1418,7 +1624,11 @@
         });
       }
 
-      function drawMapRewards(t) {
+      function drawMapRewards(t, now) {
+        var activePulseCount = 0;
+        if (overviewCanvas) {
+          overviewCanvas.dataset.activeAirdropPulseCount = "0";
+        }
         if (isTutorial && currentTutorialStep() !== "airdrop") return;
         var scale = mapScreenScale();
         rewardEvents.forEach(function (event) {
@@ -1426,8 +1636,41 @@
           if (collectedCoinIds.indexOf(String(event.id)) >= 0) return;
           var screen = worldToMap(event.x, event.y);
           var radius = Math.max(1, Number(event.radius || cfg.coin_radius) * scale);
-          if (!isOnMap(screen, radius + 20)) return;
+          if (!isOnMap(
+            screen,
+            radius * REWARD_MAP_PULSE_RADIUS_MULTIPLIER + 4
+          )) return;
           overviewCtx.save();
+          var pulseAge = isTutorial
+            ? tutorial.elapsed(now)
+            : t - Number(event.start_ms);
+          if (
+            pulseAge >= 0 &&
+            pulseAge < REWARD_MAP_PULSE_DURATION_MS
+          ) {
+            activePulseCount += 1;
+            var pulsePhase =
+              (pulseAge % REWARD_MAP_PULSE_PERIOD_MS) /
+              REWARD_MAP_PULSE_PERIOD_MS;
+            var pulseRadius = radius * (
+              1 +
+              (REWARD_MAP_PULSE_RADIUS_MULTIPLIER - 1) * pulsePhase
+            );
+            overviewCtx.beginPath();
+            overviewCtx.arc(
+              screen.x,
+              screen.y,
+              pulseRadius,
+              0,
+              Math.PI * 2
+            );
+            overviewCtx.strokeStyle =
+              "rgba(244, 196, 48, " +
+              String(0.35 + (1 - pulsePhase) * 0.65) +
+              ")";
+            overviewCtx.lineWidth = 4;
+            overviewCtx.stroke();
+          }
           if (event.line && event.line.length >= 2) {
             overviewCtx.beginPath();
             event.line.forEach(function (point, index) {
@@ -1448,6 +1691,10 @@
           overviewCtx.stroke();
           overviewCtx.restore();
         });
+        if (overviewCanvas) {
+          overviewCanvas.dataset.activeAirdropPulseCount =
+            String(activePulseCount);
+        }
       }
 
       function drawHeadingCone(screen, heading) {
@@ -1558,7 +1805,13 @@
             return String(event.id) === String(tutorialCfg.reward_id);
           });
           if (reward) {
-            if (drawMapArrow(ownScreen, worldToMap(reward.x, reward.y), "#b07d00")) {
+            if (
+              drawMapArrow(
+                ownScreen,
+                worldToMap(reward.x, reward.y),
+                "#b07d00"
+              )
+            ) {
               arrowCount += 1;
             }
           }
@@ -1599,7 +1852,13 @@
           var demoId = String((tutorialCfg.demo_car || {}).participant_id || "tutorial:other-car");
           var demoPlayer = replayPlayers[demoId];
           if (demoPlayer) {
-            if (drawMapArrow(ownScreen, worldToMap(demoPlayer.x, demoPlayer.y), "#dc2626")) {
+            if (
+              drawMapArrow(
+                ownScreen,
+                worldToMap(demoPlayer.x, demoPlayer.y),
+                "#dc2626"
+              )
+            ) {
               arrowCount += 1;
             }
           }
@@ -1632,7 +1891,7 @@
         overviewCtx.filter = "none";
         drawMapZones(t);
         drawMapPotential(t);
-        drawMapRewards(t);
+        drawMapRewards(t, now);
         overviewCtx.restore();
         drawMapPlayers(now, focusStep, observing);
         overviewCtx.save();
@@ -1647,6 +1906,7 @@
       }
 
       function tick(now) {
+        updateCountdown(now);
         if (!gameStarted) {
           lastDrawAt = now;
           renderFrame(0, now);
@@ -1703,10 +1963,15 @@
       }
 
       function leaveLobby() {
-        if (submitted) return;
+        if (submitted || !psynet.pageReady) return;
         submitted = true;
-        cleanup();
-        psynet.nextPage();
+        Promise.resolve(psynet.nextPage())
+          .then(function (passedValidation) {
+            if (!passedValidation) submitted = false;
+          })
+          .catch(function () {
+            submitted = false;
+          });
       }
 
       function pollLobbyRelease() {
@@ -1789,16 +2054,22 @@
       }
 
       function handleOverviewZoomKey(code) {
-        if (!zoomSlider) return false;
-        var min = Number(zoomSlider.min);
-        var max = Number(zoomSlider.max);
-        var step = Number(zoomSlider.step) || 1;
+        if (!overviewCanvas) return false;
+        var min = zoomSlider
+          ? Number(zoomSlider.min)
+          : (isTutorial ? 20 : 200);
+        var max = zoomSlider
+          ? Number(zoomSlider.max)
+          : (isTutorial ? 100 : 1500);
+        var step = zoomSlider
+          ? Number(zoomSlider.step) || 1
+          : (isTutorial ? 5 : 25);
         viewportMiles = clamp(
           viewportMiles + (code === "Digit1" ? step : -step),
           min,
           max
         );
-        zoomSlider.value = String(viewportMiles);
+        if (zoomSlider) zoomSlider.value = String(viewportMiles);
         updateZoomLabel();
         centerMapCameraOn(own);
         return true;

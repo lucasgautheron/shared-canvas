@@ -4,7 +4,7 @@
 The script creates four snapshots per streamlined session. Each snapshot uses:
 
 - the original Leaflet session HTML from the tornado repository on the left;
-- the current shared-canvas experiment template rendered in a browser on the right;
+- the current airdrop game template rendered in a browser on the right;
 - a composed PNG with the experimental screenshot inside a simple monitor frame.
 
 Run from the repository root:
@@ -47,6 +47,8 @@ VISUALIZATION_VIEWPORT_MILES = 750
 DEFAULT_VISUALIZATION_ASPECT_RATIO = "4:3"
 DEFAULT_VISUALIZATION_ASPECT_RATIO_VALUE = 4 / 3
 DEFAULT_OUTPUT_SCALE = 4
+COMPOSITE_ARROW_WIDTH = 68
+COMPOSITE_ARROW_LINE_WIDTH = 48
 PLAYER_COLORS = [
     "#1f77b4",
     "#d62728",
@@ -72,7 +74,7 @@ class ConfigError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create real-map to shared-canvas visualization snapshots."
+        description="Create real-map to airdrop-game visualization snapshots."
     )
     parser.add_argument(
         "--session-root",
@@ -116,9 +118,34 @@ def parse_args() -> argparse.Namespace:
         help="Screenshot device scale factor. Increase for higher-resolution PNGs.",
     )
     parser.add_argument(
+        "--overview-position",
+        choices=("top-right", "top-left"),
+        default="top-right",
+        help="Position of the participant overview map in generated screenshots.",
+    )
+    screen_options = parser.add_mutually_exclusive_group()
+    screen_options.add_argument(
         "--no-screen",
+        dest="no_screen",
         action="store_true",
-        help="Render the right panel without the monitor frame and add arrow keys.",
+        default=True,
+        help="Render without the monitor frame and add arrow keys (default).",
+    )
+    screen_options.add_argument(
+        "--with-screen",
+        dest="no_screen",
+        action="store_false",
+        help="Wrap the experiment UI in the legacy monitor frame.",
+    )
+    parser.add_argument(
+        "--reuse-intermediate",
+        action="store_true",
+        help="Recompose existing real-map and experiment-UI PNGs without rerendering.",
+    )
+    parser.add_argument(
+        "--reuse-original-map",
+        action="store_true",
+        help="Reuse existing real-map PNGs while rerendering the experiment UI.",
     )
     parser.add_argument(
         "--keep-html",
@@ -267,6 +294,66 @@ def visualization_active_player_position(
     }
 
 
+def visualization_other_player_position(
+    world: dict,
+    focus_xy: dict[str, float] | None,
+    active_player_position: dict[str, float] | None,
+    aspect_ratio: float,
+    overview_position: str,
+) -> dict[str, float] | None:
+    if focus_xy is None or active_player_position is None:
+        return None
+    projection = world.get("projection", {})
+    px_per_mile = float(projection.get("px_per_mile", 0))
+    if px_per_mile <= 0:
+        return None
+
+    width_px = VISUALIZATION_VIEWPORT_MILES * px_per_mile
+    height_px = width_px / aspect_ratio
+    canvas_size = float(world["canvas_size"])
+    focus_x = float(focus_xy["x"])
+    focus_y = float(focus_xy["y"])
+    camera_x = max(0, min(canvas_size - width_px, focus_x - width_px / 2))
+    camera_y = max(0, min(canvas_size - height_px, focus_y - height_px / 2))
+    active_x = float(active_player_position["x"])
+    active_y = float(active_player_position["y"])
+    heading_x = focus_x - active_x
+    heading_y = focus_y - active_y
+    heading_length = math.hypot(heading_x, heading_y)
+    if heading_length <= 0:
+        return None
+    forward_x = heading_x / heading_length
+    forward_y = heading_y / heading_length
+    right_x = -forward_y
+    right_y = forward_x
+    lateral_sign = 1 if overview_position == "top-left" else -1
+    forward_distance = min(width_px * 0.04, 8)
+    lateral_distance = min(width_px * 0.025, 4) * lateral_sign
+    desired_x = (
+        active_x
+        + forward_x * forward_distance
+        + right_x * lateral_distance
+    )
+    desired_y = (
+        active_y
+        + forward_y * forward_distance
+        + right_y * lateral_distance
+    )
+    return {
+        "x": round(
+            max(camera_x + width_px * 0.15, min(camera_x + width_px * 0.85, desired_x)),
+            2,
+        ),
+        "y": round(
+            max(
+                camera_y + height_px * 0.15,
+                min(camera_y + height_px * 0.85, desired_y),
+            ),
+            2,
+        ),
+    }
+
+
 def storm_persistence_game_ms(world: dict) -> int:
     raw_span = max(1, int(world["raw_time_max_ms"]) - int(world["raw_time_min_ms"]))
     game_span = max(1, int(world["game_end_ms"]) - int(world["game_start_ms"]))
@@ -293,15 +380,42 @@ def build_game_config(
     game_ms: int,
     focus_xy: dict[str, float] | None = None,
     aspect_ratio: float = DEFAULT_VISUALIZATION_ASPECT_RATIO_VALUE,
+    overview_position: str = "top-right",
 ) -> dict:
     participants = [1, 2]
     players = initial_players(participants, world)
     active_player_position = visualization_active_player_position(
         world, focus_xy, aspect_ratio
     )
+    other_player_position = visualization_other_player_position(
+        world,
+        focus_xy,
+        active_player_position,
+        aspect_ratio,
+        overview_position,
+    )
     if active_player_position is not None:
         players["1"].update(active_player_position)
+        if focus_xy is not None:
+            dx = float(focus_xy["x"]) - active_player_position["x"]
+            dy = float(focus_xy["y"]) - active_player_position["y"]
+            distance = math.hypot(dx, dy)
+            if distance > 0:
+                # Game3D derives the car heading from velocity. A tiny
+                # velocity points the parked visualization car at the focus.
+                players["1"]["vx"] = round(dx / distance * 0.1, 4)
+                players["1"]["vy"] = round(dy / distance * 0.1, 4)
+    if other_player_position is not None:
+        players["2"].update(other_player_position)
+        if focus_xy is not None:
+            dx = float(focus_xy["x"]) - other_player_position["x"]
+            dy = float(focus_xy["y"]) - other_player_position["y"]
+            distance = math.hypot(dx, dy)
+            if distance > 0:
+                players["2"]["vx"] = round(dx / distance * 0.1, 4)
+                players["2"]["vy"] = round(dy / distance * 0.1, 4)
     return {
+        "mode": "game",
         "session_id": f"visualization:{world['world_id']}",
         "participant_id": 1,
         "participant_ids": participants,
@@ -340,76 +454,71 @@ def build_game_config(
     }
 
 
-def render_shared_canvas_html(
-    config: dict, focus_xy: dict[str, float] | None, aspect_ratio_style: str
+def render_game_html(
+    config: dict,
+    aspect_ratio_style: str,
+    overview_position: str = "top-right",
 ) -> str:
     env = Environment(
         loader=FileSystemLoader(PROJECT_ROOT / "templates"),
         autoescape=select_autoescape(["html"]),
     )
-    template = env.get_template("shared_canvas.html")
+    template = env.get_template("game.html")
     html_text = str(
-        template.module.shared_canvas_control(SimpleNamespace(canvas_config=config))
+        template.module.game_control(SimpleNamespace(canvas_config=config))
     )
-    game_ms = int(config["visualization_game_ms"])
-    replacements = {
-        '<div id="waiting-overlay" class="waiting-overlay">': (
-            '<div id="waiting-overlay" class="waiting-overlay hidden">'
-        ),
-        "var serverStartedAt = null;": (
-            f"var serverStartedAt = performance.now() - {game_ms};"
-        ),
-        "var gameEndsAt = null;": (
-            "var gameEndsAt = performance.now() + "
-            f"{int(config['trial_seconds'] * 1000 - game_ms)};"
-        ),
-        "var gameStarted = false;": "var gameStarted = true;",
-    }
-    for old, new in replacements.items():
-        html_text = html_text.replace(old, new)
-    html_text = html_text.replace(
-        "aspect-ratio: 16 / 9;",
-        f"aspect-ratio: {aspect_ratio_style};",
+    config_json = json.dumps(config).replace("</", "<\\/")
+    css_uri = html.escape(
+        html_file_uri(STATIC_ROOT / "css" / "game.css"), quote=True
     )
-    if focus_xy is not None:
-        html_text = html_text.replace(
-            "updateCameraForPlayer(own);",
-            f'centerCameraOn({{"x": {focus_xy["x"]}, "y": {focus_xy["y"]}}});',
-        )
-        html_text = html_text.replace(
-            "var drawInterval = setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);",
-            (
-                f'centerCameraOn({{"x": {focus_xy["x"]}, "y": {focus_xy["y"]}}});\n'
-                "draw(performance.now());\n"
-                "var drawInterval = setInterval(function () { draw(performance.now()); }, cfg.draw_interval_ms);"
-            ),
-        )
-    html_text = html_text.replace(
-        '<div class="bonus-pill">Coin bonus: $<span id="coin-bonus">0.00</span></div>',
-        '<div class="viz-canvas-shot"><div class="bonus-pill">Bonus: $<span id="coin-bonus">0.00</span></div>',
+    three_uri = html.escape(
+        html_file_uri(STATIC_ROOT / "js" / "three.min.js"), quote=True
     )
-    html_text = html_text.replace(
-        '</div>\n  <div class="zoom-control">',
-        '</div></div>\n  <div class="zoom-control">',
-        1,
+    renderer_uri = html.escape(
+        html_file_uri(STATIC_ROOT / "js" / "game_3d.js"), quote=True
     )
+    overview_position_css = ""
+    if overview_position == "top-left":
+        overview_position_css = """
+#overview-map {
+  left: 12px;
+  right: auto;
+}
+.overview-label {
+  left: 20px;
+  right: auto;
+}
+"""
     prelude = """
+<link rel="stylesheet" href="__CSS_URI__">
 <script>
+window.visualizationConfig = __CONFIG_JSON__;
 window.psynet = {
   nextPage: function () {},
-  trial: {
-    onEvent: function (eventName, handler) {
-      if (eventName === "liveSessionInit") handler();
-      return function () {};
-    }
-  },
   addPageEventListener: function (target, eventName, handler, options) {
     if (target && target.addEventListener) target.addEventListener(eventName, handler, options);
   },
   addPageCleanupCallback: function () {},
   session: {
     participant_id: 1,
-    onFreshState: function () { return function () {}; },
+    onFreshState: function (handler) {
+      window.requestAnimationFrame(function () {
+        var cfg = window.visualizationConfig;
+        handler({
+          started: true,
+          ready_participant_ids: cfg.participant_ids.map(String),
+          state: {
+            server_start_time: new Date(
+              Date.now() - Number(cfg.visualization_game_ms || 0)
+            ).toISOString(),
+            bonuses: {"1": 0, "2": 0},
+            collected_coins: []
+          },
+          timing: cfg.timing
+        });
+      });
+      return function () {};
+    },
     onEnd: function () { return function () {}; },
     ready: function () {}
   },
@@ -421,11 +530,20 @@ window.psynet = {
 window.dallinger = {identity: {workerId: "visualization"}};
 </script>
 <style>
-.viz-canvas-shot {
-  display: inline-block;
-  width: min(1000px, 96vw);
+html,
+body {
+  margin: 0;
+  background: #ffffff;
 }
-.viz-canvas-shot .bonus-pill {
+.canvas-shell,
+.canvas-stage {
+  width: 1000px;
+  max-width: none;
+}
+#game-canvas {
+  aspect-ratio: __ASPECT_RATIO__;
+}
+.bonus-pill {
   margin-top: 0;
   margin-bottom: 1.2rem;
   padding: 0.75rem 1.35rem;
@@ -437,12 +555,23 @@ window.dallinger = {identity: {workerId: "visualization"}};
 .canvas-legend {
   display: none !important;
 }
+__OVERVIEW_POSITION_CSS__
 </style>
 """
+    prelude = (
+        prelude.replace("__CSS_URI__", css_uri)
+        .replace("__CONFIG_JSON__", config_json)
+        .replace("__ASPECT_RATIO__", aspect_ratio_style)
+        .replace("__OVERVIEW_POSITION_CSS__", overview_position_css)
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        "<title>Shared Canvas Snapshot</title></head><body>"
-        f"{prelude}{html_text}</body></html>"
+        f"<title>Airdrop Game Snapshot</title>{prelude}</head><body>"
+        f"{html_text}"
+        f'<script src="{three_uri}"></script>'
+        f'<script src="{renderer_uri}"></script>'
+        "<script>Game3D.start(window.visualizationConfig);</script>"
+        "</body></html>"
     )
 
 
@@ -678,6 +807,8 @@ def screenshot_original_map(
     output_path: Path,
     focus_lat_lng: tuple[float, float] | None,
     geo_bounds: list[list[float]] | None,
+    player_view: dict[str, float] | None,
+    other_player_views: list[dict[str, Any]],
     vil_lookup: dict[str, dict[str, float]],
     aspect_ratio: float,
 ) -> None:
@@ -686,11 +817,36 @@ def screenshot_original_map(
     page.set_viewport_size({"width": 960, "height": round(960 / aspect_ratio)})
     page.goto(html_file_uri(source_html), wait_until="networkidle")
     page.evaluate(
-        """([step, focus, bounds, vilByStorm]) => {
+        """async ([
+          step,
+          focus,
+          bounds,
+          playerView,
+          otherPlayerViews,
+          vilByStorm
+        ]) => {
           const slider = document.getElementById('timeSlider');
           const alerts = document.getElementById('alertsToggle');
           const storms = document.getElementById('stormsToggle');
           const tornadoes = document.getElementById('tornadoesToggle');
+          let basemapReady = Promise.resolve();
+          if (typeof map !== 'undefined' && typeof L !== 'undefined') {
+            map.eachLayer(function (layer) {
+              if (layer instanceof L.TileLayer) map.removeLayer(layer);
+            });
+            const basemap = L.tileLayer(
+              'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+              {
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 19
+              }
+            );
+            basemapReady = new Promise(function (resolve) {
+              basemap.once('load', resolve);
+              window.setTimeout(resolve, 5000);
+            });
+            basemap.addTo(map);
+          }
           if (alerts) alerts.checked = true;
           if (storms) storms.checked = true;
           if (tornadoes) tornadoes.checked = true;
@@ -735,18 +891,18 @@ def screenshot_original_map(
           const legend = document.getElementById('legend');
           if (legend) {
             legend.innerHTML = `
-              <div class="viz-legend-title">NWS Alerts</div>
+              <div class="viz-legend-title">Airdrop cues</div>
               <div class="viz-legend-row">
                 <span class="viz-legend-swatch alert-tornado"></span>
-                <span>Tornado Warning</span>
+                <span>Higher-chance landing zone</span>
               </div>
               <div class="viz-legend-row">
                 <span class="viz-legend-swatch alert-storm"></span>
-                <span>Storm warning</span>
+                <span>Medium-chance landing zone</span>
               </div>
               <div class="viz-legend-row">
                 <span class="viz-legend-swatch storm-cell"></span>
-                <span>Storm cells</span>
+                <span>Airplane sighting</span>
               </div>
             `;
             legend.style.padding = '19px 24px';
@@ -799,12 +955,112 @@ def screenshot_original_map(
             map.invalidateSize();
           }
           if (bounds && typeof map !== 'undefined' && typeof map.fitBounds === 'function') {
-            map.fitBounds(bounds, {animate: false, padding: [0, 0]});
+            const contextBounds = (
+              typeof L !== 'undefined' && typeof L.latLngBounds === 'function'
+            )
+              ? L.latLngBounds(bounds).pad(0.16)
+              : bounds;
+            map.fitBounds(contextBounds, {animate: false, padding: [0, 0]});
           } else if (focus && typeof map !== 'undefined' && typeof map.setView === 'function') {
             map.setView([focus[0], focus[1]], 8, {animate: false});
           }
+          if (
+            bounds &&
+            typeof map !== 'undefined' &&
+            typeof L !== 'undefined' &&
+            typeof L.rectangle === 'function'
+          ) {
+            const paneName = 'preview-bounds-pane';
+            if (!map.getPane(paneName)) {
+              const pane = map.createPane(paneName);
+              pane.style.zIndex = '650';
+              pane.style.pointerEvents = 'none';
+            }
+            L.rectangle(bounds, {
+              pane: paneName,
+              color: '#111111',
+              weight: 5,
+              opacity: 1,
+              fill: false,
+              interactive: false
+            }).addTo(map);
+          }
+          if (
+            playerView &&
+            typeof map !== 'undefined' &&
+            typeof L !== 'undefined'
+          ) {
+            const conePaneName = 'preview-cone-pane';
+            if (!map.getPane(conePaneName)) {
+              const pane = map.createPane(conePaneName);
+              pane.style.zIndex = '625';
+              pane.style.pointerEvents = 'none';
+            }
+            const markerPaneName = 'preview-car-pane';
+            if (!map.getPane(markerPaneName)) {
+              const pane = map.createPane(markerPaneName);
+              pane.style.zIndex = '675';
+              pane.style.pointerEvents = 'none';
+            }
+            const carLatLng = L.latLng(playerView.lat, playerView.lng);
+            const carPoint = map.latLngToLayerPoint(carLatLng);
+            const conePoints = [carLatLng];
+            const halfAngle = 0.48;
+            const coneRange = 160;
+            const segmentCount = 18;
+            for (let index = 0; index <= segmentCount; index += 1) {
+              const angle = (
+                playerView.heading -
+                halfAngle +
+                (2 * halfAngle * index) / segmentCount
+              );
+              conePoints.push(map.layerPointToLatLng([
+                carPoint.x + Math.cos(angle) * coneRange,
+                carPoint.y + Math.sin(angle) * coneRange
+              ]));
+            }
+            L.polygon(conePoints, {
+              pane: conePaneName,
+              color: '#111827',
+              weight: 3,
+              opacity: 0.85,
+              fillColor: '#d3d3d3',
+              fillOpacity: 0.42,
+              interactive: false
+            }).addTo(map);
+            L.circleMarker(carLatLng, {
+              pane: markerPaneName,
+              radius: 16,
+              color: '#111827',
+              weight: 6,
+              opacity: 1,
+              fillColor: '#1f77b4',
+              fillOpacity: 1,
+              interactive: false
+            }).addTo(map);
+            (otherPlayerViews || []).forEach(function (otherPlayer) {
+              L.circleMarker([otherPlayer.lat, otherPlayer.lng], {
+                pane: markerPaneName,
+                radius: 18,
+                color: '#ffffff',
+                weight: 5,
+                opacity: 1,
+                fillColor: otherPlayer.color || '#d62728',
+                fillOpacity: 1,
+                interactive: false
+              }).addTo(map);
+            });
+          }
+          await basemapReady;
         }""",
-        [step, list(focus_lat_lng) if focus_lat_lng else None, geo_bounds, vil_lookup],
+        [
+            step,
+            list(focus_lat_lng) if focus_lat_lng else None,
+            geo_bounds,
+            player_view,
+            other_player_views,
+            vil_lookup,
+        ],
     )
     browser_screenshot(page, output_path, selector="#map")
 
@@ -838,7 +1094,7 @@ def compose_html(
     ui = image_data_uri(ui_path)
     panel_height = 360
     panel_width = round(panel_height * aspect_ratio)
-    arrow_width = 92
+    arrow_width = COMPOSITE_ARROW_WIDTH
     gap = 20
     horizontal_padding = 54
     monitor_padding_x = 48
@@ -908,7 +1164,7 @@ html, body {{
   margin-top: 24px;
 }}
 .arrow-line {{
-  width: 74px;
+  width: {COMPOSITE_ARROW_LINE_WIDTH}px;
   height: 6px;
   background: #111111;
   position: relative;
@@ -976,25 +1232,26 @@ html, body {{
 }}
 .keyboard-arrows {{
   position: absolute;
-  right: 14px;
-  bottom: 14px;
+  z-index: 2;
+  right: 30px;
+  bottom: 12px;
   display: grid;
-  grid-template-columns: repeat(3, 34px);
-  grid-template-rows: repeat(2, 34px);
-  gap: 4px;
+  grid-template-columns: repeat(3, 28px);
+  grid-template-rows: repeat(2, 28px);
+  gap: 3px;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.25));
 }}
 .key {{
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
   border: 1px solid #9ca3af;
   background: linear-gradient(#ffffff, #e5e7eb);
   color: #111827;
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 700;
   box-shadow: inset 0 -2px 0 #cbd5e1;
 }}
@@ -1037,7 +1294,13 @@ def screenshot_composite(
     panel_height = 360
     panel_width = round(panel_height * aspect_ratio)
     right_panel_width = panel_width if no_screen else panel_width + 48
-    stage_width = 54 * 2 + panel_width + 92 + right_panel_width + 20 * 2
+    stage_width = (
+        54 * 2
+        + panel_width
+        + COMPOSITE_ARROW_WIDTH
+        + right_panel_width
+        + 20 * 2
+    )
     stage_height = panel_height + 24 if no_screen else 500
     page.set_viewport_size({"width": stage_width, "height": stage_height})
     page.goto(html_file_uri(html_path), wait_until="domcontentloaded")
@@ -1085,6 +1348,10 @@ def run() -> None:
             launch_kwargs["executable_path"] = executable_path
         browser = p.chromium.launch(**launch_kwargs)
         page = browser.new_page(device_scale_factor=output_scale)
+        page.route(
+            re.compile(r"https://[^/]*basemaps\.cartocdn\.com/.*"),
+            lambda route: route.abort(),
+        )
         try:
             for session_dir in session_dirs:
                 source_html = args.source_html_root / session_dir.name / "session.html"
@@ -1124,22 +1391,79 @@ def run() -> None:
                         game_ms,
                         focus_xy,
                         aspect_ratio,
+                        args.overview_position,
                     )
-                    ui_html.write_text(
-                        render_shared_canvas_html(config, focus_xy, aspect_ratio_style),
-                        encoding="utf-8",
+                    player = config["initial_player"]
+                    player_lat, player_lng = unproject_xy(
+                        visualization_world,
+                        float(player["x"]),
+                        float(player["y"]),
                     )
-                    screenshot_original_map(
-                        page,
-                        source_html,
-                        raw_ms,
-                        real_png,
-                        focus_lat_lng,
-                        geo_bounds,
-                        source_storm_vil,
-                        aspect_ratio,
-                    )
-                    screenshot_experimental_ui(page, ui_html, ui_png, aspect_ratio)
+                    player_view = {
+                        "lat": player_lat,
+                        "lng": player_lng,
+                        "heading": math.atan2(
+                            float(player.get("vy", 0)),
+                            float(player.get("vx", 0)),
+                        ),
+                    }
+                    other_player_views = []
+                    for participant_id, other_player in config[
+                        "initial_players"
+                    ].items():
+                        if str(participant_id) == str(config["participant_id"]):
+                            continue
+                        other_lat, other_lng = unproject_xy(
+                            visualization_world,
+                            float(other_player["x"]),
+                            float(other_player["y"]),
+                        )
+                        other_player_views.append(
+                            {
+                                "lat": other_lat,
+                                "lng": other_lng,
+                                "color": other_player.get("color", "#d62728"),
+                            }
+                        )
+                    if args.reuse_intermediate:
+                        missing = [
+                            path for path in (real_png, ui_png) if not path.exists()
+                        ]
+                        if missing:
+                            raise ConfigError(
+                                "Missing intermediate PNGs: "
+                                + ", ".join(str(path) for path in missing)
+                            )
+                    else:
+                        ui_html.write_text(
+                            render_game_html(
+                                config,
+                                aspect_ratio_style,
+                                args.overview_position,
+                            ),
+                            encoding="utf-8",
+                        )
+                        if args.reuse_original_map:
+                            if not real_png.exists():
+                                raise ConfigError(
+                                    f"Missing original-map PNG: {real_png}"
+                                )
+                        else:
+                            screenshot_original_map(
+                                page,
+                                source_html,
+                                raw_ms,
+                                real_png,
+                                focus_lat_lng,
+                                geo_bounds,
+                                player_view,
+                                other_player_views,
+                                source_storm_vil,
+                                aspect_ratio,
+                            )
+                        screenshot_experimental_ui(
+                            page, ui_html, ui_png, aspect_ratio
+                        )
                     composite_html.write_text(
                         compose_html(
                             session_label=session_dir.name,

@@ -6,11 +6,13 @@ from typing import List
 
 from dallinger.experiment import experiment_route
 from dallinger.experiment_server.utils import success_response
+from dominate import tags
 from flask import request
 
 import psynet.experiment
 from psynet.bot import BotDriver, advance_past_wait_pages
 from psynet.db import with_transaction
+from psynet.page import InfoPage
 from psynet.participant import Participant
 from psynet.sync import Barrier, SimpleGrouper
 from psynet.timeline import PageMaker, Timeline
@@ -26,6 +28,37 @@ else:
 
 EXPERIMENT_CONDITION = "social"
 game.configure_experiment(EXPERIMENT_CONDITION)
+
+
+def _introduction_page() -> InfoPage:
+    """Build condition-specific instructions with one sentence per paragraph."""
+
+    condition_paragraph = {
+        "asocial": "You will play by yourself.",
+        "social": (
+            "You will play in real time with other players."
+        ),
+        "live": "You will play in real time with other players.",
+    }[EXPERIMENT_CONDITION]
+
+    content = tags.div()
+    with content:
+        tags.h2("Airdrop collection game")
+        tags.p("You will navigate a map and collect airdrops.")
+        tags.p("Each airdrop you collect adds $0.10.")
+        tags.p("You will receive hints to help you locate incoming airdrops.")
+        tags.p(condition_paragraph)
+        tags.p("Click Next to take the tutorial.")
+        tags.img(
+            src="/static/game_screenshot.png",
+            alt="The airdrop driving game with its bonus, timer, and map legend.",
+            style=(
+                "display: block; width: 100%; max-width: 512px; "
+                "margin: 1rem auto 0; border: 1px solid #d6dde8; "
+                "border-radius: 12px;"
+            ),
+        )
+    return InfoPage(content, time_estimate=10)
 
 
 class Exp(psynet.experiment.Experiment):
@@ -50,7 +83,12 @@ class Exp(psynet.experiment.Experiment):
 
     timeline = Timeline(
         NoConsent(),
+        _introduction_page(),
         PageMaker(tutorial.tutorial_page, time_estimate=90),
+        InfoPage(
+            "The tutorial is finished. Click Next when you are ready to play.",
+            time_estimate=5,
+        ),
         SimpleGrouper(
             group_type=game.GROUP_TYPE,
             initial_group_size=game.GROUP_SIZE,
@@ -94,8 +132,8 @@ class Exp(psynet.experiment.Experiment):
     def test_serial_run_bots(self, bots: List[BotDriver]):
         assert tutorial.tutorial_steps("asocial") == [
             "movement",
-            "airdrop",
             "overview_map",
+            "airdrop",
             "airplane_sighting",
             "landing_zone_medium",
             "landing_zone_high",
@@ -114,18 +152,18 @@ class Exp(psynet.experiment.Experiment):
             assert answer["experiment_condition"] == EXPERIMENT_CONDITION
             assert answer["completed_steps"] == tutorial.tutorial_steps()
 
+        for bot in bots:
+            assert (
+                "The tutorial is finished. Click Next when you are ready to play."
+                in bot.current_page_text
+            )
+            bot.take_page()
+
         game.advance_past_lobby_pages(bots)
         advance_past_wait_pages(bots)
 
         world_ids_by_participant = {bot.id: [] for bot in bots}
         for trial_index in range(game.SESSION_TRIALS_PER_PARTICIPANT):
-            for bot in bots:
-                assert "Airdrop navigation" in bot.current_page_text
-                assert "Each airdrop you collect adds $0.10" in bot.current_page_text
-                bot.take_page()
-
-            advance_past_wait_pages(bots)
-
             for bot in bots:
                 assert bot.current_page_label == "game"
                 bot.take_page(response=game.build_bot_answer(bot))

@@ -622,41 +622,6 @@ def advance_past_lobby_pages(bots: List[BotDriver], max_iterations=20):
             raise RuntimeError("Not all bots finished lobby waiting in time.")
 
 
-def instruction_page():
-    content = tags.div()
-    with content:
-        tags.h2("Airdrop navigation")
-        if EXPERIMENT_CONDITION == "live":
-            tags.p(
-                "You will search for airdrops in a live driving area with another "
-                "participant. Use the arrow keys or WASD to accelerate, brake, "
-                "and steer."
-            )
-        elif EXPERIMENT_CONDITION == "social":
-            tags.p(
-                "You will search for airdrops by yourself. Cars following "
-                "recorded routes from earlier sessions will also move through "
-                "the area. Use the arrow keys or WASD to accelerate, brake, and "
-                "steer."
-            )
-        else:
-            tags.p(
-                "You will search for airdrops by yourself. No other "
-                "drivers will be visible. Use the arrow keys or WASD to "
-                "accelerate, brake, and steer."
-            )
-        tags.p(
-            "A map in the upper right shows the wider area around your car. "
-            "Use airplane sightings and potential landing zones to decide "
-            "where to search."
-        )
-        tags.p(
-            "Airdrops appear in promising places at particular times. Each "
-            "airdrop you collect adds $0.10 to your bonus."
-        )
-    return InfoPage(content, time_estimate=20)
-
-
 def build_bot_answer(bot) -> dict:
     return {
         "completed_live_canvas_browser": True,
@@ -786,7 +751,6 @@ class GameTrial(StaticTrial):
 
     def show_trial(self, experiment, participant):
         return join(
-            instruction_page(),
             LiveSessionInitializer(
                 id_="game_session",
                 group_type=GROUP_TYPE,
@@ -805,15 +769,9 @@ class GameTrial(StaticTrial):
         )
 
     def play_canvas(self, participant):
-        prompt = tags.div()
-        with prompt:
-            tags.p(
-                "Drive with the arrow keys or WASD. Use the upper-right map "
-                "to find airdrops before the session ends."
-            )
         return ModularPage(
             "game",
-            prompt,
+            "",
             GameControl(self, participant),
             save_answer="game_browser_answer",
             time_estimate=TRIAL_SECONDS + 5,
