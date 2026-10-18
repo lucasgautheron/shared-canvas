@@ -9,7 +9,7 @@
     },
     airdrop: {
       title: "Collect an airdrop",
-      instruction: "The transparent yellow cylinder marks an airdrop. Follow the arrows and drive into it. Everyone in the airdrop area receives a {bonus} bonus.",
+      instruction: "The transparent yellow cylinder marks an airdrop. Follow the arrows and drive into it, before it expires. Everyone in the airdrop area receives a {bonus} bonus.",
     },
     overview_map: {
       title: "Use the overview map",
@@ -41,7 +41,6 @@
     var completedSteps = [];
     var stepElapsedMs = {};
     var introDurationMs = Number(config.intro_duration_ms || 5000);
-    var cueBlinkPeriodMs = Number(config.cue_blink_period_ms || 800);
     var overviewPlayDurationMs = Number(
       config.overview_play_duration_ms || 4000
     );
@@ -62,20 +61,9 @@
     var overviewMap = document.getElementById("overview-map");
     var overviewLabel = document.getElementById("overview-label");
     var overviewZoomKeys = document.getElementById("overview-zoom-keys");
-    var reduceMotion = Boolean(
-      root.matchMedia &&
-      root.matchMedia("(prefers-reduced-motion: reduce)").matches
-    );
 
     function currentStep() {
       return steps[stepIndex] || null;
-    }
-
-    function observationPulseOpacity(now) {
-      if (!isObserving(now) || reduceMotion) return 1;
-      var phase = (elapsed(now) / cueBlinkPeriodMs) * Math.PI * 2;
-      var wave = (Math.sin(phase + Math.PI / 2) + 1) / 2;
-      return 0.18 + 0.82 * wave;
     }
 
     function elapsed(now) {
@@ -159,13 +147,7 @@
       var step = currentStep();
       var stepElapsed = elapsed(now);
       var observing = isObserving(now);
-      if (panel) {
-        panel.classList.toggle("observing", observing);
-        panel.style.setProperty(
-          "--tutorial-observation-pulse",
-          observationPulseOpacity(now).toFixed(3)
-        );
-      }
+      if (panel) panel.classList.toggle("observing", observing);
       options.canvas.dataset.tutorialFrozen = String(observing);
       if (timer) {
         if (step === "other_car") {

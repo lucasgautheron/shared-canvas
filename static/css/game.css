@@ -255,19 +255,9 @@
   display: none;
 }
 .tutorial-panel.observing {
-  border-color: rgba(
-    23,
-    79,
-    149,
-    var(--tutorial-observation-pulse, 1)
-  );
+  border-color: #5d82b3;
   border-width: 3px;
-  box-shadow: 0 0 0 4px rgba(
-    23,
-    79,
-    149,
-    calc(var(--tutorial-observation-pulse, 1) * 0.4)
-  );
+  box-shadow: 0 0 0 3px rgba(93, 130, 179, 0.16);
 }
 .tutorial-sighting-scale {
   display: flex;

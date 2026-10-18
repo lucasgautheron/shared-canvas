@@ -15,10 +15,11 @@
   var MAX_MAP_STORMS = 1200;
   var OVERVIEW_HEIGHT_RATIO = 0.54;
   var MAP_FOLLOW_MARGIN_RATIO = 0.3;
-  var REWARD_CYLINDER_HEIGHT = 42;
+  var REWARD_CYLINDER_HEIGHT = 84;
   var REWARD_MAP_PULSE_DURATION_MS = 4000;
   var REWARD_MAP_PULSE_PERIOD_MS = 1000;
-  var REWARD_MAP_PULSE_RADIUS_MULTIPLIER = 4;
+  var REWARD_MAP_PULSE_RADIUS_MULTIPLIER = 6;
+  var REWARD_MAP_PULSE_LINE_WIDTH = 6;
   var COIN_SOUND_DURATION_MS = 3981;
   var COIN_SOUND_URL = "/static/coin_fall.wav";
   var TUTORIAL_ARROW_BOB_PERIOD_MS = 1600;
@@ -1788,7 +1789,7 @@
               "rgba(244, 196, 48, " +
               String(0.35 + (1 - pulsePhase) * 0.65) +
               ")";
-            overviewCtx.lineWidth = 4;
+            overviewCtx.lineWidth = REWARD_MAP_PULSE_LINE_WIDTH;
             overviewCtx.stroke();
           }
           if (event.line && event.line.length >= 2) {
@@ -2026,9 +2027,12 @@
         overviewCtx.filter = "none";
         drawMapZones(t, now);
         drawMapPotential(t, now);
-        drawMapRewards(t, now);
         overviewCtx.restore();
         drawMapPlayers(now, focusStep, observing);
+        overviewCtx.save();
+        overviewCtx.filter = "none";
+        drawMapRewards(t, now);
+        overviewCtx.restore();
         overviewCtx.save();
         overviewCtx.filter = "none";
         drawTutorialMapArrows();
