@@ -126,7 +126,8 @@ class TutorialControl(game.GameAssets, Control):
             },
             "tutorial": {
                 "steps": tutorial_steps(),
-                "intro_duration_ms": 10_000,
+                "intro_duration_ms": 5_000,
+                "cue_blink_period_ms": 800,
                 "overview_play_duration_ms": 4_000,
                 "final_car_duration_ms": 15_000,
                 "movement_threshold": game.TUTORIAL_MOVEMENT_THRESHOLD,

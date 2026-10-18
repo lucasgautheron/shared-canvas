@@ -142,6 +142,10 @@ class Exp(psynet.experiment.Experiment):
         assert tutorial.tutorial_steps("live")[-1] == "other_car"
 
         for bot in bots:
+            assert "Click Next to take the tutorial." in bot.current_page_text
+            bot.take_page()
+
+        for bot in bots:
             assert bot.current_page_label == game.TUTORIAL_PAGE_LABEL
             bot.take_page(response=tutorial.tutorial_answer(bot.id))
 

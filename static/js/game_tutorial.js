@@ -40,7 +40,8 @@
     var stepStartedAt = performance.now();
     var completedSteps = [];
     var stepElapsedMs = {};
-    var introDurationMs = Number(config.intro_duration_ms || 10000);
+    var introDurationMs = Number(config.intro_duration_ms || 5000);
+    var cueBlinkPeriodMs = Number(config.cue_blink_period_ms || 800);
     var overviewPlayDurationMs = Number(
       config.overview_play_duration_ms || 4000
     );
@@ -60,9 +61,21 @@
     var highZoneLegend = document.getElementById("high-zone-legend");
     var overviewMap = document.getElementById("overview-map");
     var overviewLabel = document.getElementById("overview-label");
+    var overviewZoomKeys = document.getElementById("overview-zoom-keys");
+    var reduceMotion = Boolean(
+      root.matchMedia &&
+      root.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
 
     function currentStep() {
       return steps[stepIndex] || null;
+    }
+
+    function observationPulseOpacity(now) {
+      if (!isObserving(now) || reduceMotion) return 1;
+      var phase = (elapsed(now) / cueBlinkPeriodMs) * Math.PI * 2;
+      var wave = (Math.sin(phase + Math.PI / 2) + 1) / 2;
+      return 0.18 + 0.82 * wave;
     }
 
     function elapsed(now) {
@@ -133,6 +146,12 @@
       if (overviewLabel) {
         overviewLabel.classList.toggle("tutorial-hidden", step === "movement");
       }
+      if (overviewZoomKeys) {
+        overviewZoomKeys.classList.toggle(
+          "tutorial-hidden",
+          step === "movement"
+        );
+      }
       updateToolbar();
     }
 
@@ -140,7 +159,13 @@
       var step = currentStep();
       var stepElapsed = elapsed(now);
       var observing = isObserving(now);
-      if (panel) panel.classList.toggle("observing", observing);
+      if (panel) {
+        panel.classList.toggle("observing", observing);
+        panel.style.setProperty(
+          "--tutorial-observation-pulse",
+          observationPulseOpacity(now).toFixed(3)
+        );
+      }
       options.canvas.dataset.tutorialFrozen = String(observing);
       if (timer) {
         if (step === "other_car") {

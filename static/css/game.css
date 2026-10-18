@@ -255,8 +255,19 @@
   display: none;
 }
 .tutorial-panel.observing {
-  border-color: #5d82b3;
-  box-shadow: 0 0 0 3px rgba(93, 130, 179, 0.16);
+  border-color: rgba(
+    23,
+    79,
+    149,
+    var(--tutorial-observation-pulse, 1)
+  );
+  border-width: 3px;
+  box-shadow: 0 0 0 4px rgba(
+    23,
+    79,
+    149,
+    calc(var(--tutorial-observation-pulse, 1) * 0.4)
+  );
 }
 .tutorial-sighting-scale {
   display: flex;
@@ -393,6 +404,36 @@
   background: #f8fbff;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
   pointer-events: none;
+}
+#overview-map.tutorial-cue-highlight {
+  border-color: #174f95;
+  box-shadow: 0 0 0 5px rgba(23, 79, 149, 0.45);
+}
+.overview-zoom-keys {
+  position: absolute;
+  z-index: 2;
+  top: 18px;
+  left: calc(100% - 12px - var(--overview-size, 54%) + 8px);
+  display: flex;
+  gap: 0.3rem;
+  pointer-events: none;
+}
+.overview-zoom-keys kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  padding: 0;
+  border: 1px solid #78879a;
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.9);
+  color: #22334d;
+  box-shadow: 0 2px 0 rgba(120, 135, 154, 0.72);
+  font-family: system-ui, sans-serif;
+  font-size: 0.9rem;
+  font-weight: 800;
+  line-height: 1;
 }
 .tutorial-hidden {
   display: none !important;

@@ -14,7 +14,7 @@
   var GRID_DIVISIONS = 640;
   var MAX_MAP_STORMS = 1200;
   var OVERVIEW_HEIGHT_RATIO = 0.54;
-  var BORDER_MARGIN_MILES = 25;
+  var MAP_FOLLOW_MARGIN_RATIO = 0.3;
   var REWARD_CYLINDER_HEIGHT = 42;
   var REWARD_MAP_PULSE_DURATION_MS = 4000;
   var REWARD_MAP_PULSE_PERIOD_MS = 1000;
@@ -23,6 +23,7 @@
   var COIN_SOUND_URL = "/static/coin_fall.wav";
   var TUTORIAL_ARROW_BOB_PERIOD_MS = 1600;
   var TUTORIAL_ARROW_BOB_WORLD_AMPLITUDE = 4;
+  var TUTORIAL_CUE_BLINK_PERIOD_MS = 800;
   var CHASER_TRACK_COLORS = ["#2563eb", "#7c3aed", "#0891b2", "#db2777", "#059669", "#ea580c"];
 
   function clamp(value, low, high) {
@@ -228,10 +229,17 @@
       var rewardEvents = cfg.reward_events || [];
       var timing = cfg.timing || {};
       var tutorialCfg = cfg.tutorial || {};
+      var tutorialCueBlinkPeriodMs = Number(
+        tutorialCfg.cue_blink_period_ms || TUTORIAL_CUE_BLINK_PERIOD_MS
+      );
       var tutorial = null;
       var tutorialLastMovementPosition = null;
       var tutorialMovementDistance = 0;
       var tutorialArrow = null;
+      var reduceMotion = Boolean(
+        root.matchMedia &&
+        root.matchMedia("(prefers-reduced-motion: reduce)").matches
+      );
       var serverStartedAt = null;
       var gameEndsAt = null;
       var collectedCoinIds = [];
@@ -336,6 +344,27 @@
 
       function isTutorialObserving(now) {
         return Boolean(tutorial && tutorial.isObserving(now));
+      }
+
+      function tutorialCuePulseOpacity(now, dimAlpha) {
+        if (!isTutorialObserving(now) || reduceMotion) return 1;
+        var phase =
+          (tutorial.elapsed(now) / tutorialCueBlinkPeriodMs) *
+          Math.PI *
+          2;
+        var wave = (Math.sin(phase + Math.PI / 2) + 1) / 2;
+        return dimAlpha + (1 - dimAlpha) * wave;
+      }
+
+      function tutorialCueAlpha(cue, now, dimAlpha) {
+        if (
+          !isTutorial ||
+          currentTutorialStep() !== cue ||
+          !isTutorialObserving(now)
+        ) {
+          return 1;
+        }
+        return tutorialCuePulseOpacity(now, dimAlpha);
       }
 
       function tutorialCueForObject(object) {
@@ -644,7 +673,7 @@
           waitingOverlay.classList.remove("hidden");
           waitingOverlay.textContent = experimentCondition === "live"
             ? "Waiting for other players"
-            : "Preparing your airdrop session...";
+            : "Preparing your session...";
           return;
         }
         waitingOverlay.classList.toggle("hidden", gameStarted);
@@ -718,7 +747,7 @@
           return;
         }
         var width = viewportWorldWidth();
-        var margin = Math.min(width / 2, BORDER_MARGIN_MILES * pxPerMile);
+        var margin = width * MAP_FOLLOW_MARGIN_RATIO;
         var x = Number(player.x || 0);
         var y = Number(player.y || 0);
         if (x < mapCamera.x + margin) mapCamera.x = x - margin;
@@ -1178,7 +1207,7 @@
           tutorialLastMovementPosition = { x: own.x, y: own.y };
           var movementPracticeElapsed =
             tutorial.elapsed(now) -
-            Number(tutorialCfg.intro_duration_ms || 10000);
+            Number(tutorialCfg.intro_duration_ms || 5000);
           if (
             movementPracticeElapsed >=
               Number(tutorialCfg.movement_min_duration_ms || 5000) &&
@@ -1410,6 +1439,9 @@
         camera.updateProjectionMatrix();
         overviewSize = Math.round(height * OVERVIEW_HEIGHT_RATIO);
         if (!isLobby && overviewCanvas && overviewCtx) {
+          if (stage) {
+            stage.style.setProperty("--overview-size", overviewSize + "px");
+          }
           overviewCanvas.style.width = overviewSize + "px";
           overviewCanvas.style.height = overviewSize + "px";
           overviewCanvas.width = Math.round(overviewSize * pixelRatio);
@@ -1530,6 +1562,51 @@
         });
       }
 
+      function setTutorialObjectOpacity(object, opacity) {
+        object.traverse(function (child) {
+          if (!child.material) return;
+          var materials = Array.isArray(child.material)
+            ? child.material
+            : [child.material];
+          materials.forEach(function (material) {
+            material.userData = material.userData || {};
+            if (material.userData.tutorialOriginalOpacity == null) {
+              material.userData.tutorialOriginalOpacity = material.opacity;
+              material.userData.tutorialOriginalTransparent =
+                material.transparent;
+            }
+            var originalOpacity =
+              material.userData.tutorialOriginalOpacity;
+            var originalTransparent =
+              material.userData.tutorialOriginalTransparent;
+            material.opacity = originalOpacity * opacity;
+            var transparent = originalTransparent || opacity < 0.999;
+            if (material.transparent !== transparent) {
+              material.transparent = transparent;
+              material.needsUpdate = true;
+            }
+          });
+        });
+      }
+
+      function updateTutorialCueBlink(now) {
+        if (!isTutorial) return;
+        var step = currentTutorialStep();
+        var observing = isTutorialObserving(now);
+        var opacity = tutorialCuePulseOpacity(now, 0.18);
+        canvas.dataset.tutorialCueBlink = observing ? String(step) : "none";
+        canvas.dataset.tutorialCueBlinkOpacity = opacity.toFixed(3);
+        var cueMeshes = rewardMeshes.concat(zoneMeshes);
+        Object.keys(carMeshes).forEach(function (id) {
+          cueMeshes.push(carMeshes[id]);
+        });
+        cueMeshes.forEach(function (mesh) {
+          var isActiveCue =
+            observing && tutorialCueForObject(mesh) === step;
+          setTutorialObjectOpacity(mesh, isActiveCue ? opacity : 1);
+        });
+      }
+
       function syncWaiters(waiterIds) {
         var allowed = {};
         (waiterIds || []).forEach(function (id) {
@@ -1586,13 +1663,19 @@
         }
       }
 
-      function drawMapZones(t) {
+      function drawMapZones(t, now) {
         var tutorialStep = currentTutorialStep();
         if (
           isTutorial &&
           tutorialStep !== "landing_zone_medium" &&
           tutorialStep !== "landing_zone_high"
         ) return;
+        overviewCtx.save();
+        overviewCtx.globalAlpha = tutorialCueAlpha(
+          tutorialStep,
+          now,
+          0.18
+        );
         warnings.forEach(function (zone) {
           if (Number(zone.eff_ms) > t || Number(zone.exp_ms) < t) return;
           if (isTutorial) {
@@ -1616,9 +1699,10 @@
             overviewCtx.stroke();
           });
         });
+        overviewCtx.restore();
       }
 
-      function drawMapPotential(t) {
+      function drawMapPotential(t, now) {
         if (isTutorial && currentTutorialStep() !== "airplane_sighting") return;
         advancePotential(t);
         var visiblePotential = activePotential.map(function (point) {
@@ -1637,11 +1721,18 @@
           var vil = point[4];
           var size = Math.max(8, Math.min(cfg.player_radius * 1.6, 7 + Number(vil || 0) * 0.12));
           var half = size / 2;
+          overviewCtx.save();
+          overviewCtx.globalAlpha = tutorialCueAlpha(
+            "airplane_sighting",
+            now,
+            0.18
+          );
           overviewCtx.fillStyle = potentialCssColor(vil);
           overviewCtx.fillRect(screen.x - half, screen.y - half, size, size);
           overviewCtx.strokeStyle = "rgba(255, 255, 255, 0.75)";
           overviewCtx.lineWidth = 1;
           overviewCtx.strokeRect(screen.x - half, screen.y - half, size, size);
+          overviewCtx.restore();
         });
       }
 
@@ -1662,6 +1753,11 @@
             radius * REWARD_MAP_PULSE_RADIUS_MULTIPLIER + 4
           )) return;
           overviewCtx.save();
+          overviewCtx.globalAlpha = tutorialCueAlpha(
+            "airdrop",
+            now,
+            0.18
+          );
           var pulseAge = isTutorial
             ? tutorial.elapsed(now)
             : t - Number(event.start_ms);
@@ -1768,7 +1864,9 @@
           overviewCtx.filter = keepColor
             ? "none"
             : "grayscale(1) brightness(0.68)";
-          overviewCtx.globalAlpha = 0.5;
+          var cue = isOwn ? "movement" : "other_car";
+          overviewCtx.globalAlpha =
+            0.5 * tutorialCueAlpha(cue, now, 0.18);
           overviewCtx.beginPath();
           overviewCtx.arc(screen.x, screen.y, markerRadius, 0, Math.PI * 2);
           overviewCtx.fillStyle = player.color || (isOwn ? "#1f77b4" : "#d62728");
@@ -1895,6 +1993,19 @@
         var observing = isTutorialObserving(now);
         var muteMapBackground =
           observing && focusStep !== "overview_map";
+        var highlightingOverview =
+          observing && focusStep === "overview_map";
+        if (overviewCanvas) {
+          overviewCanvas.dataset.tutorialCueBlink =
+            observing ? String(focusStep) : "none";
+          overviewCanvas.classList.toggle(
+            "tutorial-cue-highlight",
+            highlightingOverview
+          );
+          overviewCanvas.style.opacity = highlightingOverview
+            ? tutorialCuePulseOpacity(now, 0.28).toFixed(3)
+            : "";
+        }
         overviewCtx.clearRect(0, 0, overviewSize, overviewSize);
         overviewCtx.save();
         overviewCtx.filter = muteMapBackground
@@ -1910,8 +2021,8 @@
         overviewCtx.restore();
         overviewCtx.save();
         overviewCtx.filter = "none";
-        drawMapZones(t);
-        drawMapPotential(t);
+        drawMapZones(t, now);
+        drawMapPotential(t, now);
         drawMapRewards(t, now);
         overviewCtx.restore();
         drawMapPlayers(now, focusStep, observing);
@@ -1948,6 +2059,7 @@
           updateZoneMeshes(t);
         }
         updateCars(now);
+        updateTutorialCueBlink(now);
         updateCameras();
         renderFrame(t, now);
       }
@@ -2076,7 +2188,21 @@
         centerMapCameraOn(own);
       }
 
-      function handleOverviewZoomKey(code) {
+      function overviewZoomDirection(event) {
+        if (
+          event.key === "+" ||
+          event.key === "=" ||
+          event.code === "NumpadAdd"
+        ) return -1;
+        if (
+          event.key === "-" ||
+          event.key === "_" ||
+          event.code === "NumpadSubtract"
+        ) return 1;
+        return 0;
+      }
+
+      function handleOverviewZoomKey(direction) {
         if (!overviewCanvas) return false;
         var min = zoomSlider
           ? Number(zoomSlider.min)
@@ -2088,7 +2214,7 @@
           ? Number(zoomSlider.step) || 1
           : (isTutorial ? 5 : 25);
         viewportMiles = clamp(
-          viewportMiles + (code === "Digit1" ? step : -step),
+          viewportMiles + direction * step,
           min,
           max
         );
@@ -2113,19 +2239,19 @@
       function handleKeyDown(event) {
         if (isTextInput(event.target)) return;
         ensureCoinFallAudio();
+        var zoomDirection = overviewZoomDirection(event);
         if (
           isTutorialObserving(performance.now()) &&
           (
-            event.code === "Digit1" ||
-            event.code === "Digit2" ||
+            zoomDirection !== 0 ||
             driveKeyForEvent(event)
           )
         ) {
           event.preventDefault();
           return;
         }
-        if (event.code === "Digit1" || event.code === "Digit2") {
-          if (handleOverviewZoomKey(event.code)) {
+        if (zoomDirection !== 0) {
+          if (handleOverviewZoomKey(zoomDirection)) {
             event.preventDefault();
             return;
           }
