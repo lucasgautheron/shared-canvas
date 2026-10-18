@@ -1719,7 +1719,10 @@
           var point = entry.point;
           var screen = entry.screen;
           var vil = point[4];
-          var size = Math.max(8, Math.min(cfg.player_radius * 1.6, 7 + Number(vil || 0) * 0.12));
+          var size = 0.75 * Math.max(
+            8,
+            Math.min(cfg.player_radius * 1.6, 7 + Number(vil || 0) * 0.12)
+          );
           var half = size / 2;
           overviewCtx.save();
           overviewCtx.globalAlpha = tutorialCueAlpha(
