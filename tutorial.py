@@ -5,10 +5,7 @@ from __future__ import annotations
 from psynet.modular_page import Control, ModularPage
 from psynet.participant import Participant
 
-if __package__:
-    from . import game
-else:
-    import game
+from . import game
 
 
 def tutorial_steps(condition: str | None = None) -> list[str]:
@@ -144,8 +141,9 @@ class TutorialControl(game.GameAssets, Control):
                     "participant_id": "tutorial:other-car",
                     "label": "Another driver",
                     "color": game.PLAYER_COLORS[1],
-                    "orbit_radius": 3.5,
-                    "orbit_seconds": 8,
+                    "loop_ahead": 6,
+                    "loop_radius": 2.5,
+                    "loop_seconds": 8,
                 },
             },
         }

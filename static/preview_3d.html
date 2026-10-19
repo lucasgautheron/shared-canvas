@@ -12,6 +12,13 @@
       border: 2px solid #22334d; border-radius: 12px; background: #f8fbff;
       pointer-events: none;
     }
+    .overview-zoom-keys {
+      position: absolute; z-index: 2; top: 18px; right: 220px;
+      display: flex; gap: 0.3rem;
+    }
+    .overview-zoom-keys button {
+      width: 1.45rem; height: 1.45rem; cursor: pointer; font-weight: 800;
+    }
     .waiting-overlay { display: none; }
   </style>
 </head>
@@ -20,6 +27,10 @@
   <div class="canvas-stage">
     <canvas id="game-canvas" width="960" height="540" tabindex="0"></canvas>
     <canvas id="overview-map" width="540" height="540"></canvas>
+    <div id="overview-zoom-keys" class="overview-zoom-keys" aria-label="Overview map zoom">
+      <button type="button" id="overview-zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" id="overview-zoom-out" aria-label="Zoom out">−</button>
+    </div>
     <div id="waiting-overlay" class="waiting-overlay"></div>
   </div>
   <p>Map width: <span id="zoom-label">200</span> miles</p>

@@ -96,22 +96,21 @@
 .game-legend {
   display: flex;
   flex: 1 1 auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-evenly;
-  row-gap: 0.25rem;
   min-width: 0;
-  padding: 0.35rem 0.45rem;
+  padding: 0.35rem 0.3rem;
 }
 .legend-group {
   display: flex;
   align-items: center;
-  gap: 0.28rem;
+  gap: 0.18rem;
   white-space: nowrap;
 }
 .legend-group + .legend-group {
-  margin-left: 0.4rem;
-  padding-left: 0.4rem;
+  margin-left: 0.28rem;
+  padding-left: 0.28rem;
   border-left: 1px solid #cfdae8;
 }
 .legend-title {
@@ -242,7 +241,7 @@
   align-items: flex-start;
   justify-content: center;
   gap: 1.4rem;
-  margin-top: 0.35rem;
+  margin-top: 0;
   color: #3f5068;
   font-size: 0.85rem;
   font-weight: 700;
@@ -342,7 +341,7 @@
   align-items: center;
   gap: 0.4rem;
   width: fit-content;
-  margin-top: 0.55rem;
+  margin: 0.55rem auto 0;
   color: #52606d;
   font-size: 0.85rem;
   font-weight: 700;

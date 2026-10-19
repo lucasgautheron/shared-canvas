@@ -22,6 +22,7 @@
   var REWARD_MAP_PULSE_LINE_WIDTH = 6;
   var COIN_SOUND_DURATION_MS = 3981;
   var COIN_SOUND_URL = "/static/coin_fall.wav";
+  var SESSION_START_SOUND_URL = "/static/starting-alarm.mp3";
   var TUTORIAL_ARROW_BOB_PERIOD_MS = 1600;
   var TUTORIAL_ARROW_BOB_WORLD_AMPLITUDE = 4;
   var TUTORIAL_CUE_BLINK_PERIOD_MS = 800;
@@ -294,6 +295,7 @@
       var zoneMeshes = [];
       var tutorialFocusStep = null;
       var tutorialFocusObserving = null;
+      var tutorialDemoLoop = null;
       var cameraOffset = new THREE.Vector3();
       var lookTarget = new THREE.Vector3();
 
@@ -707,6 +709,7 @@
         } else {
           serverStartedAt = now;
         }
+        var startingNow = !gameStarted;
         gameStarted = true;
         gameEndsAt = serverStartedAt + trialMs;
         lastDrawAt = now;
@@ -714,6 +717,9 @@
         activePotential = [];
         lastPotentialTime = 0;
         updateWaitingOverlay();
+        if (startingNow && !isLobby && !isTutorial) {
+          playSessionStartSound();
+        }
       }
 
       function viewportWorldWidth() {
@@ -869,6 +875,14 @@
         var audio = ensureCoinFallAudio();
         audio.pause();
         audio.currentTime = 0;
+        var playback = audio.play();
+        if (playback && typeof playback.catch === "function") {
+          playback.catch(function () {});
+        }
+      }
+
+      function playSessionStartSound() {
+        var audio = new Audio(SESSION_START_SOUND_URL);
         var playback = audio.play();
         if (playback && typeof playback.catch === "function") {
           playback.catch(function () {});
@@ -1057,6 +1071,7 @@
         var demo = tutorialCfg.demo_car || {};
         var id = String(demo.participant_id || "tutorial:other-car");
         if (currentTutorialStep() !== "other_car") {
+          tutorialDemoLoop = null;
           canvas.dataset.tutorialDemoCarVisible = "false";
           delete replayPlayers[id];
           if (carMeshes[id]) {
@@ -1065,21 +1080,44 @@
           }
           return;
         }
-        var radius = Number(demo.orbit_radius || 3.5);
-        var periodMs = Math.max(1000, Number(demo.orbit_seconds || 8) * 1000);
+        var ahead = Number(demo.loop_ahead || 6);
+        var radius = Number(demo.loop_radius || 2.5);
+        var periodMs = Math.max(1000, Number(demo.loop_seconds || 8) * 1000);
         var angle = tutorial.elapsed(now) / periodMs * Math.PI * 2;
         var angularSpeed = Math.PI * 2 / (periodMs / 1000);
-        var vx = -Math.sin(angle) * radius * angularSpeed;
-        var vy = Math.cos(angle) * radius * angularSpeed;
+        if (!tutorialDemoLoop) {
+          var forwardX0 = Math.cos(own.heading);
+          var forwardY0 = Math.sin(own.heading);
+          tutorialDemoLoop = {
+            x: own.x + forwardX0 * ahead,
+            y: own.y + forwardY0 * ahead,
+            forwardX: forwardX0,
+            forwardY: forwardY0,
+            rightX: -forwardY0,
+            rightY: forwardX0,
+          };
+        }
+        var forwardX = tutorialDemoLoop.forwardX;
+        var forwardY = tutorialDemoLoop.forwardY;
+        var rightX = tutorialDemoLoop.rightX;
+        var rightY = tutorialDemoLoop.rightY;
+        var offsetX = rightX * Math.cos(angle) + forwardX * Math.sin(angle);
+        var offsetY = rightY * Math.cos(angle) + forwardY * Math.sin(angle);
+        var tangentX = -rightX * Math.sin(angle) + forwardX * Math.cos(angle);
+        var tangentY = -rightY * Math.sin(angle) + forwardY * Math.cos(angle);
         replayPlayers[id] = {
           participant_id: id,
           label: demo.label || "Another driver",
           color: demo.color || "#d62728",
-          x: own.x + Math.cos(angle) * radius,
-          y: own.y + Math.sin(angle) * radius,
-          vx: vx,
-          vy: vy,
-          heading: headingFromVelocity(vx, vy, 0),
+          x: tutorialDemoLoop.x + offsetX * radius,
+          y: tutorialDemoLoop.y + offsetY * radius,
+          vx: tangentX * radius * angularSpeed,
+          vy: tangentY * radius * angularSpeed,
+          heading: headingFromVelocity(
+            tangentX * radius * angularSpeed,
+            tangentY * radius * angularSpeed,
+            own.heading
+          ),
           received_at: now,
         };
         canvas.dataset.tutorialDemoCarVisible = "true";

@@ -25,24 +25,17 @@ from psynet.session import (
     session,
 )
 from psynet.sync import Barrier, GroupBarrier
-from psynet.timeline import join
+from psynet.timeline import Event, join
 from psynet.trial.static import StaticNode, StaticTrial
 from psynet.websocket import ClientWebSocketMessage, ServerWebSocketMessage
 
-if __package__:
-    from .session_worlds import (
-        load_world_definitions,
-        node_definition_from_world,
-        public_world_payload,
-        write_world_json,
-    )
-else:
-    from session_worlds import (
-        load_world_definitions,
-        node_definition_from_world,
-        public_world_payload,
-        write_world_json,
-    )
+from .session_worlds import (
+    PLAYER_SPEED_LIMIT_MPH,
+    load_world_definitions,
+    node_definition_from_world,
+    public_world_payload,
+    write_world_json,
+)
 
 
 GROUP_TYPE = "game_group"
@@ -747,6 +740,29 @@ class GameControl(GameAssets, LiveSessionControl):
         return build_bot_answer(bot)
 
 
+def session_start_page() -> InfoPage:
+    """Remind the participant of the speed limit before a game session."""
+
+    content = tags.div()
+    with content:
+        tags.p(
+            "You will now be playing the game. "
+            f"Your car speed will be limited to {PLAYER_SPEED_LIMIT_MPH}mph."
+        )
+        tags.p("Click Next when you are ready")
+    return InfoPage(
+        content,
+        time_estimate=8,
+        events={
+            "submitEnable": Event(
+                is_triggered_by="trialStart",
+                delay=3.0,
+                once=True,
+            ),
+        },
+    )
+
+
 class GameTrial(StaticTrial):
     time_estimate = TRIAL_SECONDS + 35
 
@@ -763,6 +779,7 @@ class GameTrial(StaticTrial):
 
     def show_trial(self, experiment, participant):
         return join(
+            session_start_page(),
             LiveSessionInitializer(
                 id_="game_session",
                 group_type=GROUP_TYPE,

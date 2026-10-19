@@ -15,17 +15,12 @@ from psynet.db import transaction, with_transaction
 from psynet.page import InfoPage
 from psynet.participant import Participant
 from psynet.sync import Barrier, SimpleGrouper
-from psynet.timeline import Event, PageMaker, Timeline
+from psynet.timeline import PageMaker, Timeline
 from psynet.trial.static import StaticTrialMaker
 from psynet.consent import NoConsent
 
-if __package__:
-    from . import game, tutorial
-    from .session_worlds import PLAYER_SPEED_LIMIT_MPH
-else:
-    import game
-    import tutorial
-    from session_worlds import PLAYER_SPEED_LIMIT_MPH
+from . import game, tutorial
+from .session_worlds import PLAYER_SPEED_LIMIT_MPH
 
 
 EXPERIMENT_CONDITION = "social"
@@ -63,28 +58,14 @@ def _introduction_page() -> InfoPage:
     return InfoPage(content, time_estimate=10)
 
 
-def _ready_to_play_page() -> InfoPage:
-    """Tell the participant the game is starting, then enable Next after 3 seconds."""
+def _tutorial_finished_page() -> InfoPage:
+    """Confirm that the guided tutorial is over."""
 
     content = tags.div()
     with content:
-        tags.h2("Start the game")
-        tags.p(
-            "The tutorial is finished. You will now be playing the game. "
-            f"Your car speed will be limited to {PLAYER_SPEED_LIMIT_MPH}mph."
-        )
-        tags.p("Click Next when you are ready")
-    return InfoPage(
-        content,
-        time_estimate=8,
-        events={
-            "submitEnable": Event(
-                is_triggered_by="trialStart",
-                delay=3.0,
-                once=True,
-            ),
-        },
-    )
+        tags.h2("Tutorial finished")
+        tags.p("The tutorial is finished.")
+    return InfoPage(content, time_estimate=5)
 
 
 class Exp(psynet.experiment.Experiment):
@@ -111,7 +92,7 @@ class Exp(psynet.experiment.Experiment):
         NoConsent(),
         _introduction_page(),
         PageMaker(tutorial.tutorial_page, time_estimate=90),
-        _ready_to_play_page(),
+        _tutorial_finished_page(),
         SimpleGrouper(
             group_type=game.GROUP_TYPE,
             initial_group_size=game.GROUP_SIZE,
@@ -153,13 +134,9 @@ class Exp(psynet.experiment.Experiment):
         return success_response(waiting=waiting, waiter_count=len(waiters))
 
     def test_serial_run_bots(self, bots: List[BotDriver]):
-        ready_pages = [
-            elt
-            for elt in self.timeline.all_elts
-            if getattr(elt, "events", {}).get("submitEnable", {}).get("delay") == 3.0
-        ]
-        assert len(ready_pages) == 1
-        assert ready_pages[0].events["submitEnable"]["is_triggered_by"][0][
+        session_page = game.session_start_page()
+        assert session_page.events["submitEnable"]["delay"] == 3.0
+        assert session_page.events["submitEnable"]["is_triggered_by"][0][
             "triggering_event"
         ] == "trialStart"
 
@@ -190,19 +167,24 @@ class Exp(psynet.experiment.Experiment):
             assert answer["completed_steps"] == tutorial.tutorial_steps()
 
         for bot in bots:
-            assert (
-                "The tutorial is finished. You will now be playing the game. "
-                f"Your car speed is limited to {PLAYER_SPEED_LIMIT_MPH}mph."
-                in bot.current_page_text
-            )
-            assert "Click Next when you are ready" in bot.current_page_text
+            assert "The tutorial is finished." in bot.current_page_text
             bot.take_page()
 
         game.advance_past_lobby_pages(bots)
-        advance_past_wait_pages(bots)
 
         world_ids_by_participant = {bot.id: [] for bot in bots}
         for trial_index in range(game.SESSION_TRIALS_PER_PARTICIPANT):
+            for bot in bots:
+                assert (
+                    "You will now be playing the game. "
+                    f"Your car speed will be limited to {PLAYER_SPEED_LIMIT_MPH}mph."
+                    in bot.current_page_text
+                )
+                assert "Click Next when you are ready" in bot.current_page_text
+                bot.take_page()
+
+            advance_past_wait_pages(bots)
+
             for bot in bots:
                 assert bot.current_page_label == "game"
                 if trial_index == 0 and bot is bots[0]:

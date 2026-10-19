@@ -2,10 +2,12 @@
 (function (root) {
   "use strict";
 
+  var STEP_TRANSITION_SOUND_URL = "/static/starting-alarm.mp3";
+
   var STEP_COPY = {
     movement: {
       title: "Learn to move your car",
-      instruction: "Follow the 3D arrow and move away from your starting point using your keyboard.",
+      instruction: "Move away from your starting point using your keyboard.",
     },
     airdrop: {
       title: "Collect an airdrop",
@@ -17,7 +19,7 @@
     },
     airplane_sighting: {
       title: "Drive to an airplane sighting",
-      instruction: "Colored squares on the overview map are airplane sightings. The scale below runs from low to high confidence. Follow the arrow and drive to the highlighted square.",
+      instruction: "Airplane sightings appear on the overview map. They are indicated by squares reflecting their degree of confidence. Follow the arrow and drive to the highlighted square.",
     },
     landing_zone_medium: {
       title: "Drive to a possible landing zone",
@@ -196,6 +198,14 @@
       return null;
     }
 
+    function playStepTransitionSound() {
+      var audio = new Audio(STEP_TRANSITION_SOUND_URL);
+      var playback = audio.play();
+      if (playback && typeof playback.catch === "function") {
+        playback.catch(function () {});
+      }
+    }
+
     function advance(now) {
       var step = currentStep();
       if (!step) return;
@@ -211,6 +221,7 @@
         if (options.onComplete) options.onComplete(now);
         return;
       }
+      playStepTransitionSound();
       renderCopy();
     }
 
