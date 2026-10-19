@@ -9,33 +9,27 @@
       <h2 id="tutorial-title">Learn to move your car</h2>
       <div id="tutorial-progress" class="tutorial-progress">Step 1 of {{ params.canvas_config.tutorial.steps | length }}</div>
     </div>
-    <p id="tutorial-instruction">Follow the arrow and move away from your starting point.</p>
+    <p id="tutorial-instruction">Follow the 3D arrow and move away from your starting point using your keyboard.</p>
     <div id="tutorial-drive-keys" class="tutorial-drive-keys" role="group" aria-label="Up or W moves forward, left or A steers left, down or S reverses, and right or D steers right">
-      <div class="drive-scheme">
-        <span class="drive-scheme-title">Use the arrow keys</span>
-        <div class="key-pad" aria-hidden="true">
-          <span class="key-legend key-legend-forward">Forward</span>
-          <kbd class="key-up">↑</kbd>
-          <span class="key-legend key-legend-left">Steer left</span>
-          <kbd class="key-left">←</kbd>
-          <kbd class="key-down">↓</kbd>
-          <kbd class="key-right">→</kbd>
-          <span class="key-legend key-legend-right">Steer right</span>
-          <span class="key-legend key-legend-reverse">Reverse</span>
-        </div>
+      <div class="key-pad" aria-hidden="true">
+        <span class="key-legend key-legend-forward">Forward</span>
+        <kbd class="key-up">↑</kbd>
+        <span class="key-legend key-legend-left">Steer left</span>
+        <kbd class="key-left">←</kbd>
+        <kbd class="key-down">↓</kbd>
+        <kbd class="key-right">→</kbd>
+        <span class="key-legend key-legend-right">Steer right</span>
+        <span class="key-legend key-legend-reverse">Reverse</span>
       </div>
-      <div class="drive-scheme">
-        <span class="drive-scheme-title">or WASD</span>
-        <div class="key-pad" aria-hidden="true">
-          <span class="key-legend key-legend-forward">Forward</span>
-          <kbd class="key-up">W</kbd>
-          <span class="key-legend key-legend-left">Steer left</span>
-          <kbd class="key-left">A</kbd>
-          <kbd class="key-down">S</kbd>
-          <kbd class="key-right">D</kbd>
-          <span class="key-legend key-legend-right">Steer right</span>
-          <span class="key-legend key-legend-reverse">Reverse</span>
-        </div>
+      <div class="key-pad" aria-hidden="true">
+        <span class="key-legend key-legend-forward">Forward</span>
+        <kbd class="key-up">W</kbd>
+        <span class="key-legend key-legend-left">Steer left</span>
+        <kbd class="key-left">A</kbd>
+        <kbd class="key-down">S</kbd>
+        <kbd class="key-right">D</kbd>
+        <span class="key-legend key-legend-right">Steer right</span>
+        <span class="key-legend key-legend-reverse">Reverse</span>
       </div>
     </div>
     <div id="tutorial-sighting-scale" class="tutorial-sighting-scale hidden" role="img" aria-label="Airplane sighting confidence from low to high">
@@ -120,9 +114,9 @@
     {% endif %}
     {% if not is_lobby %}
     <canvas id="overview-map" class="{% if is_tutorial %}tutorial-hidden{% endif %}" width="540" height="540" aria-label="Airdrop search overview"></canvas>
-    <div id="overview-zoom-keys" class="overview-zoom-keys{% if is_tutorial %} tutorial-hidden{% endif %}" aria-label="Overview map zoom controls: plus to zoom in, minus to zoom out">
-      <kbd>+</kbd>
-      <kbd>−</kbd>
+    <div id="overview-zoom-keys" class="overview-zoom-keys{% if is_tutorial %} tutorial-hidden{% endif %}" aria-label="Overview map zoom">
+      <button type="button" id="overview-zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" id="overview-zoom-out" aria-label="Zoom out">−</button>
     </div>
     <div id="overview-label" class="overview-label{% if is_tutorial %} tutorial-hidden{% endif %}">Map</div>
     {% endif %}

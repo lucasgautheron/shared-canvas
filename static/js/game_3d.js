@@ -202,6 +202,8 @@
       var canvas = document.getElementById("game-canvas");
       var waitingOverlay = document.getElementById("waiting-overlay");
       var overviewCanvas = document.getElementById("overview-map");
+      var overviewZoomIn = document.getElementById("overview-zoom-in");
+      var overviewZoomOut = document.getElementById("overview-zoom-out");
       var overviewCtx = overviewCanvas ? overviewCanvas.getContext("2d") : null;
       var zoomSlider = document.getElementById("zoom-slider");
       var zoomLabel = document.getElementById("zoom-label");
@@ -1189,8 +1191,15 @@
         });
       }
 
+      function setOverviewZoomEnabled(enabled) {
+        [overviewZoomIn, overviewZoomOut].forEach(function (button) {
+          if (button) button.disabled = !enabled;
+        });
+      }
+
       function updateTutorial(now) {
         if (!isTutorial || submitted) return;
+        setOverviewZoomEnabled(!isTutorialObserving(now));
         var step = currentTutorialStep();
         var tutorialAction = tutorial.update(now);
         updateTutorialDemoCar(now);
@@ -2207,6 +2216,11 @@
         return 0;
       }
 
+      function handleOverviewZoomClick(direction) {
+        if (isTutorialObserving(performance.now())) return;
+        handleOverviewZoomKey(direction);
+      }
+
       function handleOverviewZoomKey(direction) {
         if (!overviewCanvas) return false;
         var min = zoomSlider
@@ -2289,6 +2303,18 @@
         viewportMiles = Number(zoomSlider.value || 750);
         updateZoomLabel();
         psynet.addPageEventListener(zoomSlider, "input", handleZoomChange);
+      }
+      if (overviewZoomIn) {
+        psynet.addPageEventListener(overviewZoomIn, "click", function (event) {
+          event.preventDefault();
+          handleOverviewZoomClick(-1);
+        });
+      }
+      if (overviewZoomOut) {
+        psynet.addPageEventListener(overviewZoomOut, "click", function (event) {
+          event.preventDefault();
+          handleOverviewZoomClick(1);
+        });
       }
       psynet.addPageEventListener(canvas, "click", handleCanvasClick);
       psynet.addPageEventListener(window, "keydown", handleKeyDown, true);

@@ -507,6 +507,7 @@ class CollectMessage(ClientWebSocketMessage):
             client_game_time_ms=self.game_time_ms,
         )
         if accepted:
+            participant.current_trial.record_collected_airdrop()
             CoinCollectedMessage(
                 collection=CanvasGameState.public_collection_payload(collection),
                 coins=session.coins or [],
@@ -749,6 +750,17 @@ class GameControl(GameAssets, LiveSessionControl):
 class GameTrial(StaticTrial):
     time_estimate = TRIAL_SECONDS + 35
 
+    @property
+    def airdrop_count(self) -> int:
+        """Return how many airdrops this trial has accepted."""
+
+        return int((self.vars or {}).get("airdrop_count", 0))
+
+    def record_collected_airdrop(self):
+        """Count one accepted airdrop so finalization can pay it."""
+
+        self.var.airdrop_count = self.airdrop_count + 1
+
     def show_trial(self, experiment, participant):
         return join(
             LiveSessionInitializer(
@@ -817,9 +829,7 @@ class GameTrial(StaticTrial):
         }
 
     def score_answer(self, answer, definition):
-        if isinstance(answer, dict):
-            return int(round(float(answer.get("coin_bonus", 0.0)) / COIN_BONUS))
-        return 0
+        return self.airdrop_count
 
     def compute_performance_reward(self, score):
         return max(0.0, score * COIN_BONUS)

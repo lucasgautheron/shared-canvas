@@ -250,15 +250,6 @@
 .tutorial-drive-keys.hidden {
   display: none;
 }
-.drive-scheme {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.2rem;
-}
-.drive-scheme-title {
-  font-size: 0.78rem;
-}
 .key-pad {
   display: inline-grid;
   grid-template-columns: auto 1.45rem 1.45rem 1.45rem auto;
@@ -494,9 +485,8 @@
   left: calc(100% - 12px - var(--overview-size, 54%) + 8px);
   display: flex;
   gap: 0.3rem;
-  pointer-events: none;
 }
-.overview-zoom-keys kbd {
+.overview-zoom-keys button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -508,10 +498,19 @@
   background: rgba(255, 255, 255, 0.9);
   color: #22334d;
   box-shadow: 0 2px 0 rgba(120, 135, 154, 0.72);
+  cursor: pointer;
   font-family: system-ui, sans-serif;
   font-size: 0.9rem;
   font-weight: 800;
   line-height: 1;
+}
+.overview-zoom-keys button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 0 rgba(120, 135, 154, 0.72);
+}
+.overview-zoom-keys button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 .tutorial-hidden {
   display: none !important;

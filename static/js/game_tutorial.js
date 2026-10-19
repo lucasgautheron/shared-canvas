@@ -5,7 +5,7 @@
   var STEP_COPY = {
     movement: {
       title: "Learn to move your car",
-      instruction: "Follow the 3D arrow and move away from your starting point.",
+      instruction: "Follow the 3D arrow and move away from your starting point using your keyboard.",
     },
     airdrop: {
       title: "Collect an airdrop",
