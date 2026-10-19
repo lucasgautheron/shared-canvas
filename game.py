@@ -30,6 +30,7 @@ from psynet.trial.static import StaticNode, StaticTrial
 from psynet.websocket import ClientWebSocketMessage, ServerWebSocketMessage
 
 from .session_worlds import (
+    PLAYER_RADIUS,
     PLAYER_SPEED_LIMIT_MPH,
     load_world_definitions,
     node_definition_from_world,
@@ -49,7 +50,6 @@ TRIAL_SECONDS = 5 * 60
 SESSION_TRIALS_PER_PARTICIPANT = 4
 SEND_INTERVAL_MS = 100
 DRAW_INTERVAL_MS = 25
-PLAYER_RADIUS = 12
 COIN_RADIUS = 10
 COIN_BONUS = 0.10
 STORM_CHASER_TRACK_COUNT = 16
@@ -634,6 +634,7 @@ class GameAssets:
         return [
             "/static/js/three.min.js",
             "/static/js/game_tutorial.js",
+            "/static/js/game_collision.js",
             "/static/js/game_3d.js",
         ]
 

@@ -66,6 +66,7 @@
     };
   </script>
   <script src="/static/js/three.min.js"></script>
+  <script src="/static/js/game_collision.js"></script>
   <script src="/static/js/game_3d.js"></script>
   <script>
     var previewPlayers = {
@@ -89,10 +90,16 @@
       player_radius: 12,
       coin_radius: 18,
       coin_bonus: 0.1,
-      max_player_speed: 0.5,
+      max_player_speed: 80,
       projection: { px_per_mile: 1 },
       initial_player: { x: 180, y: 220, vx: 0, vy: 0, color: "#1f77b4" },
       initial_players: previewPlayers,
+      lake_obstacles: [{
+        id: "preview-lake",
+        name: "Preview Lake",
+        points: [[220, 180], [275, 180], [275, 260], [220, 260]],
+        bounds: { minX: 220, minY: 180, maxX: 275, maxY: 260 },
+      }],
       storm_points: [
         [0, 300000, 240, 210, 35, 50, 0],
         [0, 300000, 300, 190, 55, 60, 0],

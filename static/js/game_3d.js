@@ -1,4 +1,4 @@
-/* global GameTutorial, THREE, psynet */
+/* global GameCollision, GameTutorial, THREE, psynet */
 (function (root) {
   "use strict";
 
@@ -229,6 +229,7 @@
       var lastPotentialTime = 0;
       var chaserTracks = usesReplayCars ? (cfg.chaser_tracks || []).slice() : [];
       var warnings = cfg.warnings || [];
+      var lakeObstacles = cfg.lake_obstacles || [];
       var rewardEvents = cfg.reward_events || [];
       var timing = cfg.timing || {};
       var tutorialCfg = cfg.tutorial || {};
@@ -983,8 +984,19 @@
         own.vx = Math.cos(own.heading) * own.speed;
         own.vy = Math.sin(own.heading) * own.speed;
         var margin = Math.max(Number(cfg.player_radius || 12), 8);
-        own.x = clamp(own.x + own.vx * dt, margin, canvasSize - margin);
-        own.y = clamp(own.y + own.vy * dt, margin, canvasSize - margin);
+        var from = { x: own.x, y: own.y };
+        var to = {
+          x: clamp(own.x + own.vx * dt, margin, canvasSize - margin),
+          y: clamp(own.y + own.vy * dt, margin, canvasSize - margin),
+        };
+        var movement = GameCollision.resolveMovement(from, to, lakeObstacles);
+        own.x = movement.x;
+        own.y = movement.y;
+        if (movement.hit) {
+          own.speed = 0;
+          own.vx = 0;
+          own.vy = 0;
+        }
         own.client_time = now;
         own.received_at = now;
         players[participantId] = Object.assign({}, own);
@@ -1365,6 +1377,51 @@
         return String(zone.event || "").toLowerCase().indexOf("tornado") >= 0;
       }
 
+      function createLakeMesh(lake) {
+        var shape = new THREE.Shape();
+        (lake.points || []).forEach(function (point, index) {
+          var x = worldX(point[0]);
+          var y = -worldZ(point[1]);
+          if (index === 0) shape.moveTo(x, y);
+          else shape.lineTo(x, y);
+        });
+        shape.closePath();
+
+        var group = new THREE.Group();
+        group.userData = { lake: lake };
+        var fill = new THREE.Mesh(
+          new THREE.ShapeGeometry(shape),
+          new THREE.MeshBasicMaterial({
+            color: 0x3b82b8,
+            transparent: true,
+            opacity: 0.88,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+            polygonOffsetUnits: -1,
+          })
+        );
+        fill.rotation.x = -Math.PI / 2;
+        fill.position.y = 0.08;
+        group.add(fill);
+
+        var outlinePoints = (lake.points || []).map(function (point) {
+          return new THREE.Vector3(worldX(point[0]), 0.1, worldZ(point[1]));
+        });
+        if (outlinePoints.length) outlinePoints.push(outlinePoints[0].clone());
+        group.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(outlinePoints),
+          new THREE.LineBasicMaterial({
+            color: 0x174a72,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false,
+          })
+        ));
+        return group;
+      }
+
       function createZoneMesh(zone, polygon) {
         var highPriority = zoneIsHighPriority(zone);
         var color = highPriority ? 0xe41a1c : 0xffcc33;
@@ -1534,6 +1591,11 @@
         scene.add(grid);
 
         if (!isLobby) {
+          lakeObstacles.forEach(function (lake) {
+            if ((lake.points || []).length < 3) return;
+            scene.add(createLakeMesh(lake));
+          });
+          canvas.dataset.lakeObstacleCount = String(lakeObstacles.length);
           rewardEvents.forEach(function (event) {
             var mesh = createRewardMesh(event);
             rewardMeshes.push(mesh);
@@ -1709,6 +1771,24 @@
           overviewCtx.lineTo(overviewSize, sy);
           overviewCtx.stroke();
         }
+      }
+
+      function drawMapLakes() {
+        lakeObstacles.forEach(function (lake) {
+          if (!(lake.points || []).length) return;
+          overviewCtx.beginPath();
+          lake.points.forEach(function (point, index) {
+            var screen = worldToMap(point[0], point[1]);
+            if (index === 0) overviewCtx.moveTo(screen.x, screen.y);
+            else overviewCtx.lineTo(screen.x, screen.y);
+          });
+          overviewCtx.closePath();
+          overviewCtx.fillStyle = "rgba(59, 130, 184, 0.78)";
+          overviewCtx.fill();
+          overviewCtx.strokeStyle = "rgba(23, 74, 114, 0.9)";
+          overviewCtx.lineWidth = 1.5;
+          overviewCtx.stroke();
+        });
       }
 
       function drawMapZones(t, now) {
@@ -2066,6 +2146,7 @@
           overviewCtx.restore();
           return;
         }
+        drawMapLakes();
         drawMapGrid();
         overviewCtx.restore();
         overviewCtx.save();

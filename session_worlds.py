@@ -6,8 +6,12 @@ import json
 import math
 import os
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from shapely.geometry import MultiPolygon, Point, Polygon, box
+from shapely.ops import unary_union
 
 
 TORNADO_VISIBLE_MS = 30 * 60 * 1000
@@ -18,6 +22,7 @@ STORM_FRAME_MS = 50
 MAX_STORM_POINTS_PER_FRAME = 100
 DEBUG_STORM_FRACTION = 0.1
 PLAYER_SPEED_LIMIT_MPH = 60
+PLAYER_RADIUS = 12
 TORNADO_REWARD_RADIUS_MILES = 10
 MILES_PER_LAT_DEGREE = 69.0
 CONUS_LAT_MIN = 24.0
@@ -25,6 +30,24 @@ CONUS_LAT_MAX = 50.0
 CONUS_LNG_MIN = -125.0
 CONUS_LNG_MAX = -66.0
 CONUS_MID_LAT = (CONUS_LAT_MIN + CONUS_LAT_MAX) / 2
+GREAT_LAKES_PATH = (
+    Path(__file__).resolve().parent
+    / "static"
+    / "geography"
+    / "great_lakes_50m.geojson"
+)
+GREAT_LAKE_NAMES = {
+    "Lake Superior",
+    "Lake Michigan",
+    "Lake Huron",
+    "Lake Erie",
+    "Lake Ontario",
+}
+LAKE_SIMPLIFY_TOLERANCE_PX = 0.5
+BROWSER_WORLD_VERSION = (
+    "great-lakes-50m-v1-"
+    + hashlib.sha256(GREAT_LAKES_PATH.read_bytes()).hexdigest()[:12]
+)
 
 
 def parse_float(value: Any) -> float | None:
@@ -427,6 +450,157 @@ class CanvasProjection:
         return self.scale / MILES_PER_LAT_DEGREE
 
 
+@lru_cache(maxsize=1)
+def _load_great_lake_rings() -> tuple[tuple[str, tuple[tuple[float, float], ...]], ...]:
+    """Load the pinned Natural Earth shoreline rings as latitude/longitude pairs."""
+
+    data = json.loads(GREAT_LAKES_PATH.read_text(encoding="utf-8"))
+    rings = []
+    found_names = set()
+    for feature in data.get("features", []):
+        name = feature.get("properties", {}).get("name")
+        if name not in GREAT_LAKE_NAMES:
+            continue
+        geometry = feature.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        geometry_type = geometry.get("type")
+        if geometry_type == "Polygon":
+            polygons = [coordinates]
+        elif geometry_type == "MultiPolygon":
+            polygons = coordinates
+        else:
+            continue
+        for polygon in polygons:
+            if not polygon:
+                continue
+            outer_ring = tuple(
+                (float(coord[1]), float(coord[0]))
+                for coord in polygon[0]
+                if len(coord) >= 2
+            )
+            if len(outer_ring) >= 3:
+                rings.append((name, outer_ring))
+                found_names.add(name)
+
+    missing_names = GREAT_LAKE_NAMES - found_names
+    if missing_names:
+        raise RuntimeError(
+            "Pinned Great Lakes data is missing: "
+            + ", ".join(sorted(missing_names))
+        )
+    return tuple(rings)
+
+
+def _polygon_parts(geometry) -> list[Polygon]:
+    if isinstance(geometry, Polygon):
+        return [geometry]
+    if isinstance(geometry, MultiPolygon):
+        return list(geometry.geoms)
+    return [
+        part
+        for child in getattr(geometry, "geoms", [])
+        for part in _polygon_parts(child)
+    ]
+
+
+def _great_lake_obstacles(
+    projection: CanvasProjection,
+    *,
+    canvas_size: int,
+) -> list[dict]:
+    """Project, merge, simplify, and bound visible Great Lakes shorelines."""
+
+    canvas_bounds = box(0, 0, canvas_size, canvas_size)
+    lake_polygons = []
+    for _name, ring in _load_great_lake_rings():
+        projected = [
+            (
+                projection.project(lat, lng)["x"],
+                projection.project(lat, lng)["y"],
+            )
+            for lat, lng in ring
+        ]
+        polygon = Polygon(projected)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        lake_polygons.extend(_polygon_parts(polygon))
+
+    collision_geometry = (
+        unary_union(lake_polygons)
+        .simplify(LAKE_SIMPLIFY_TOLERANCE_PX, preserve_topology=True)
+        .intersection(canvas_bounds)
+    )
+    obstacles = []
+    for part_index, part in enumerate(_polygon_parts(collision_geometry)):
+        points = [
+            [round(float(x), 2), round(float(y), 2)]
+            for x, y in list(part.exterior.coords)[:-1]
+        ]
+        if len(points) < 3:
+            continue
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        obstacles.append(
+            {
+                "id": f"great-lakes-{part_index}",
+                "name": "Great Lakes",
+                "points": points,
+                "bounds": {
+                    "minX": min(xs),
+                    "minY": min(ys),
+                    "maxX": max(xs),
+                    "maxY": max(ys),
+                },
+            }
+        )
+    return obstacles
+
+
+def _move_point_outside_obstacles(
+    x: float,
+    y: float,
+    obstacles: list[dict],
+    *,
+    clearance: float = 0.5,
+) -> dict[str, float]:
+    """Move a point inside an obstacle just beyond its nearest shoreline."""
+
+    candidate = Point(float(x), float(y))
+    for _ in range(max(1, len(obstacles) * 2)):
+        containing_obstacle = None
+        containing_polygon = None
+        for obstacle in obstacles:
+            bounds = obstacle["bounds"]
+            if not (
+                bounds["minX"] <= candidate.x <= bounds["maxX"]
+                and bounds["minY"] <= candidate.y <= bounds["maxY"]
+            ):
+                continue
+            polygon = Polygon(obstacle["points"])
+            if polygon.covers(candidate):
+                containing_obstacle = obstacle
+                containing_polygon = polygon
+                break
+        if containing_obstacle is None:
+            break
+
+        shoreline = containing_polygon.exterior.interpolate(
+            containing_polygon.exterior.project(candidate)
+        )
+        dx = shoreline.x - candidate.x
+        dy = shoreline.y - candidate.y
+        distance = math.hypot(dx, dy)
+        if distance <= 1e-9:
+            dx = shoreline.x - containing_polygon.centroid.x
+            dy = shoreline.y - containing_polygon.centroid.y
+            distance = max(math.hypot(dx, dy), 1.0)
+        candidate = Point(
+            shoreline.x + clearance * dx / distance,
+            shoreline.y + clearance * dy / distance,
+        )
+    return {"x": round(candidate.x, 2), "y": round(candidate.y, 2)}
+
+
 def _time_window(storms: list[dict], warnings: list[dict], tornadoes: list[dict]) -> tuple[int, int]:
     times = []
     for storm in storms:
@@ -534,6 +708,10 @@ def build_world_from_session_dir(
         if _in_conus(point[1], point[2])
     ]
     projection = CanvasProjection(canvas_size, storm_coords)
+    lake_obstacles = _great_lake_obstacles(
+        projection,
+        canvas_size=canvas_size,
+    )
 
     def game(raw_ms: int) -> int:
         return _game_ms(raw_ms, raw_min_ms, raw_max_ms, trial_seconds)
@@ -565,6 +743,7 @@ def build_world_from_session_dir(
     spawn_points = []
     for spotter in spotter_initial_positions:
         xy = projection.project(*spotter["point"])
+        xy = _move_point_outside_obstacles(xy["x"], xy["y"], lake_obstacles)
         spawn_points.append(
             {
                 "id": spotter["id"],
@@ -673,10 +852,11 @@ def build_world_from_session_dir(
     seed = int(hashlib.sha256(label.encode("utf-8")).hexdigest()[:8], 16)
     return {
         "world_id": f"session-{label}",
+        "browser_world_version": BROWSER_WORLD_VERSION,
         "session_label": label,
         "seed": seed,
         "canvas_size": canvas_size,
-        "player_radius": 12,
+        "player_radius": PLAYER_RADIUS,
         "coin_radius": coin_radius,
         "coin_bonus": coin_bonus,
         "max_player_speed": _speed_limit_px_per_s(
@@ -701,6 +881,7 @@ def build_world_from_session_dir(
         "storm_points": storm_points,
         "chaser_tracks": chaser_tracks,
         "warnings": rendered_warnings,
+        "lake_obstacles": lake_obstacles,
         "reward_targets": reward_targets,
         "reward_events": reward_events,
         "spawn_points": spawn_points,
@@ -761,6 +942,7 @@ def load_world_definitions(
 
 NODE_DEFINITION_KEYS = (
     "world_id",
+    "browser_world_version",
     "session_label",
     "seed",
     "canvas_size",
@@ -783,6 +965,7 @@ BROWSER_WORLD_KEYS = (
     "storm_points",
     "chaser_tracks",
     "warnings",
+    "lake_obstacles",
     "reward_events",
 )
 
@@ -809,6 +992,7 @@ def session_dir_for_label(
 
 def write_world_json(
     path,
+    browser_world_version,
     session_label,
     canvas_size,
     trial_seconds,
@@ -816,6 +1000,10 @@ def write_world_json(
     coin_bonus,
 ):
     """Write browser-only map arrays for a PsyNet cached function asset."""
+    if browser_world_version != BROWSER_WORLD_VERSION:
+        raise RuntimeError(
+            "Browser world cache version does not match the current geometry."
+        )
     static_root = Path(__file__).resolve().parent / "static"
     world = build_world_from_session_dir(
         session_dir_for_label(static_root, session_label),
