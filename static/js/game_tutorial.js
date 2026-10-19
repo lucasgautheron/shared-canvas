@@ -9,7 +9,7 @@
     },
     airdrop: {
       title: "Collect an airdrop",
-      instruction: "The transparent yellow cylinder marks an airdrop. Follow the arrows and drive into it, before it expires. Everyone in the airdrop area receives a {bonus} bonus.",
+      instruction: "The transparent purple cylinder marks an airdrop. Follow the arrows and drive into it, before it expires. Everyone in the airdrop area receives a {bonus} bonus.",
     },
     overview_map: {
       title: "Use the overview map",
@@ -54,10 +54,12 @@
     var sightingScale = document.getElementById("tutorial-sighting-scale");
     var continueButton = document.getElementById("tutorial-continue");
     var bonusDisplay = document.getElementById("bonus-display");
+    var airdropLegend = document.getElementById("airdrop-legend");
     var sightingLegend = document.getElementById("sighting-legend");
     var landingZoneLegend = document.getElementById("landing-zone-legend");
     var mediumZoneLegend = document.getElementById("medium-zone-legend");
     var highZoneLegend = document.getElementById("high-zone-legend");
+    var participantLegend = document.getElementById("participant-legend");
     var overviewMap = document.getElementById("overview-map");
     var overviewLabel = document.getElementById("overview-label");
     var overviewZoomKeys = document.getElementById("overview-zoom-keys");
@@ -84,7 +86,11 @@
       var showSightings = hasReached("airplane_sighting");
       var showMediumZone = hasReached("landing_zone_medium");
       var showHighZone = hasReached("landing_zone_high");
+      var showParticipants = steps.indexOf("other_car") >= 0
+        ? hasReached("other_car")
+        : hasReached("overview_map");
       if (bonusDisplay) bonusDisplay.classList.toggle("hidden", !showBonus);
+      if (airdropLegend) airdropLegend.classList.toggle("hidden", !showBonus);
       if (sightingLegend) {
         sightingLegend.classList.toggle("hidden", !showSightings);
       }
@@ -96,6 +102,9 @@
       }
       if (highZoneLegend) {
         highZoneLegend.classList.toggle("hidden", !showHighZone);
+      }
+      if (participantLegend) {
+        participantLegend.classList.toggle("hidden", !showParticipants);
       }
     }
 

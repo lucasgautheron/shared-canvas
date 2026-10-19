@@ -41,11 +41,10 @@
   function potentialCssColor(vil) {
     return interpolateCssColor([
       [0, "#377eb8"],
-      [10, "#4daf4a"],
-      [25, "#ffcc33"],
-      [45, "#ff7f00"],
-      [65, "#e41a1c"],
-      [85, "#984ea3"],
+      [13.08, "#4daf4a"],
+      [32.69, "#ffcc33"],
+      [58.85, "#ff7f00"],
+      [85, "#e41a1c"],
     ], vil);
   }
 
@@ -217,7 +216,7 @@
       var pxPerMile = Number((cfg.projection || {}).px_per_mile || 1);
       var viewportMiles = zoomSlider
         ? Number(zoomSlider.value || 750)
-        : (isTutorial ? 40 : 750);
+        : (isTutorial ? 81.25 : 750);
       var initialPlayers = cfg.initial_players || {};
       var players = {};
       var replayPlayers = {};
@@ -650,9 +649,10 @@
         if (!speedGauge) return;
         var maxSpeed = Number(cfg.max_player_speed || 0);
         var speedLimitMph = Number(cfg.speed_limit_mph || 60);
-        var speedRatio = maxSpeed > 0
-          ? Math.min(1, Math.abs(Number(own.speed) || 0) / maxSpeed)
-          : 0;
+        var speed = Math.abs(Number(own.speed) || 0);
+        // max_player_speed is 60 mph after undoing the session time compression.
+        // Dividing by it restores real-world mph; map units per game second do not.
+        var speedRatio = maxSpeed > 0 ? Math.min(1, speed / maxSpeed) : 0;
         var speedMph = Math.round(speedRatio * speedLimitMph);
         speedGauge.setAttribute("aria-valuemax", String(speedLimitMph));
         speedGauge.setAttribute("aria-valuenow", String(speedMph));
@@ -1386,9 +1386,9 @@
         var rewardArea = new THREE.Mesh(
           new THREE.CylinderGeometry(radius, radius, cylinderHeight, 48, 1, true),
           new THREE.MeshBasicMaterial({
-            color: 0xf4c430,
+            color: 0x8b5cf6,
             transparent: true,
-            opacity: 0.1,
+            opacity: 0.18,
             depthWrite: false,
             side: THREE.DoubleSide,
           })
@@ -1405,7 +1405,7 @@
           });
           group.add(new THREE.Line(
             new THREE.BufferGeometry().setFromPoints(points),
-            new THREE.LineBasicMaterial({ color: 0xf4c430 })
+            new THREE.LineBasicMaterial({ color: 0x8b5cf6 })
           ));
         }
         group.position.set(worldX(event.x), 0, worldZ(event.y));
@@ -1786,7 +1786,7 @@
               Math.PI * 2
             );
             overviewCtx.strokeStyle =
-              "rgba(244, 196, 48, " +
+              "rgba(139, 92, 246, " +
               String(0.35 + (1 - pulsePhase) * 0.65) +
               ")";
             overviewCtx.lineWidth = REWARD_MAP_PULSE_LINE_WIDTH;
@@ -1799,16 +1799,14 @@
               if (index === 0) overviewCtx.moveTo(linePoint.x, linePoint.y);
               else overviewCtx.lineTo(linePoint.x, linePoint.y);
             });
-            overviewCtx.strokeStyle = "rgba(244, 196, 48, 0.85)";
+            overviewCtx.strokeStyle = "rgba(139, 92, 246, 0.85)";
             overviewCtx.lineWidth = 4;
             overviewCtx.stroke();
           }
           overviewCtx.beginPath();
           overviewCtx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-          overviewCtx.fillStyle = "#f4c430";
-          overviewCtx.fill();
-          overviewCtx.strokeStyle = "#a27400";
-          overviewCtx.lineWidth = 2;
+          overviewCtx.strokeStyle = "#8b5cf6";
+          overviewCtx.lineWidth = Math.max(4, radius * 0.7);
           overviewCtx.stroke();
           overviewCtx.restore();
         });
@@ -2216,7 +2214,7 @@
           : (isTutorial ? 20 : 200);
         var max = zoomSlider
           ? Number(zoomSlider.max)
-          : (isTutorial ? 100 : 1500);
+          : 1500;
         var step = zoomSlider
           ? Number(zoomSlider.step) || 1
           : (isTutorial ? 5 : 25);
